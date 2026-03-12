@@ -12,9 +12,9 @@ Quick start
 >>> plot_payoff(s)
 """
 
-from .core import Option, StockPosition, Strategy
+from core import Option, StockPosition, Strategy
 
-from .strategies import (
+from strategies import (
     long_call,
     short_call,
     long_put,
@@ -35,11 +35,11 @@ from .strategies import (
     protective_put,
 )
 
-from .visualization import plot_payoff, plot_multi_strategies, plot_payoff_grid
+from visualization import plot_payoff, plot_multi_strategies, plot_payoff_grid
 
 # Market data is optional (requires yfinance + internet)
 try:
-    from .market_data import (
+    from market_data import (
         get_spot_price,
         get_available_expiries,
         get_options_chain,

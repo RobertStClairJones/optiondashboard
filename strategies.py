@@ -26,7 +26,7 @@ With underlying
 
 from datetime import date
 
-from .core import Option, StockPosition, Strategy
+from core import Option, StockPosition, Strategy
 
 
 # ---------------------------------------------------------------------------

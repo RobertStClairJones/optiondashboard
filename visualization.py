@@ -12,7 +12,7 @@ import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
 import numpy as np
 
-from .core import Option, Strategy
+from core import Option, Strategy
 
 # Colour palette (colourblind-friendly enough, dark background friendly)
 _PALETTE = [

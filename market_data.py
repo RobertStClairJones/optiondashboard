@@ -30,7 +30,7 @@ from datetime import datetime, date
 
 import pandas as pd
 
-from .core import Option
+from core import Option
 
 
 # ---------------------------------------------------------------------------

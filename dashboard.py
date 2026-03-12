@@ -14,8 +14,8 @@ from __future__ import annotations
 import sys
 import os
 
-# Allow running as `streamlit run option_payoff/dashboard.py` from any directory
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# Ensure the repo root is on the path so sibling modules are importable
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import warnings
 from datetime import date, datetime, timedelta
@@ -23,8 +23,8 @@ from datetime import date, datetime, timedelta
 import numpy as np
 import streamlit as st
 
-from option_payoff.core import Option, StockPosition, Strategy
-from option_payoff.visualization import plot_payoff, plot_multi_strategies
+from core import Option, StockPosition, Strategy
+from visualization import plot_payoff, plot_multi_strategies
 
 warnings.filterwarnings("ignore")
 
@@ -171,7 +171,7 @@ if mode == "Manual entry":
 # ── Live market data ──────────────────────────────────────────────────────────
 else:
     try:
-        from option_payoff.market_data import (
+        from market_data import (
             get_spot_price,
             get_available_expiries,
             get_options_chain,
