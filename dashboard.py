@@ -4,8 +4,6 @@ dashboard.py
 Streamlit interactive dashboard for option payoff visualisation.
 
 Run with:
-    streamlit run option_payoff/dashboard.py
-or from the project root:
     streamlit run dashboard.py
 """
 
@@ -14,7 +12,6 @@ from __future__ import annotations
 import sys
 import os
 
-# Ensure the repo root is on the path so sibling modules are importable
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import warnings
@@ -24,7 +21,7 @@ import numpy as np
 import streamlit as st
 
 from core import Option, StockPosition, Strategy
-from visualization import plot_payoff, plot_multi_strategies
+from visualization import plot_payoff, plot_payoff_plotly, plot_multi_strategies
 
 warnings.filterwarnings("ignore")
 
@@ -34,12 +31,13 @@ warnings.filterwarnings("ignore")
 
 st.set_page_config(
     page_title="Option Payoff Visualiser",
-    page_icon="📈",
     layout="wide",
 )
 
-st.title("📈 Option Payoff Visualiser")
-st.caption("Build custom option strategies, visualise payoff diagrams, and compute realised P&L.")
+st.title("Option Payoff Visualiser")
+st.caption(
+    "Build custom option strategies, visualise payoff diagrams, and compute realised P&L."
+)
 
 # ---------------------------------------------------------------------------
 # Sidebar — mode selector
@@ -69,6 +67,19 @@ def _add_leg(leg_dict: dict):
 
 def _clear_legs():
     st.session_state.legs = []
+
+
+def _compute_auto_range(legs: list[dict], padding: float = 0.30) -> tuple[float, float]:
+    """Derive a sensible x-axis range from the legs' strikes / entry prices."""
+    ref_prices = [L["K"] for L in legs]
+    if not ref_prices:
+        return 50.0, 150.0
+    lo, hi = min(ref_prices), max(ref_prices)
+    mid = (lo + hi) / 2
+    spread = max(hi - lo, mid * 0.15)
+    lo_plot = max(lo - spread * (1 + padding), 0.01)
+    hi_plot = hi + spread * (1 + padding)
+    return round(lo_plot, 2), round(hi_plot, 2)
 
 
 # ---------------------------------------------------------------------------
@@ -113,7 +124,6 @@ PRESETS = {
     ],
 }
 
-
 # ---------------------------------------------------------------------------
 # Preset selector (sidebar)
 # ---------------------------------------------------------------------------
@@ -133,16 +143,15 @@ if st.sidebar.button("Load preset"):
 # SECTION 1: Add legs
 # ---------------------------------------------------------------------------
 
-st.header("1 · Build Your Strategy")
+st.header("1. Build Your Strategy")
 
-# Strategy name
 st.session_state.strategy_name = st.text_input(
     "Strategy name", value=st.session_state.strategy_name
 )
 
-# ── Manual entry ─────────────────────────────────────────────────────────────
+# -- Manual entry -----------------------------------------------------------
 if mode == "Manual entry":
-    with st.expander("➕ Add a new leg", expanded=True):
+    with st.expander("Add a new leg", expanded=True):
         c1, c2, c3, c4, c5, c6 = st.columns([1.5, 1.5, 1.2, 1.2, 1.2, 1.5])
 
         opt_type = c1.selectbox("Type", ["call", "put", "stock (underlying)"], key="new_type")
@@ -168,7 +177,7 @@ if mode == "Manual entry":
             ))
             st.rerun()
 
-# ── Live market data ──────────────────────────────────────────────────────────
+# -- Live market data -------------------------------------------------------
 else:
     try:
         from market_data import (
@@ -182,12 +191,12 @@ else:
         market_ok = False
 
     if market_ok:
-        with st.expander("🔍 Fetch from market", expanded=True):
+        with st.expander("Fetch from market", expanded=True):
             col_t, col_e = st.columns([2, 2])
-            ticker_input = col_t.text_input("Ticker symbol", value="AAPL",
-                                            placeholder="AAPL, SPY, TSLA…").upper()
+            ticker_input = col_t.text_input(
+                "Ticker symbol", value="AAPL", placeholder="AAPL, SPY, TSLA…"
+            ).upper()
 
-            # Fetch expiries
             if st.button("Fetch expiry dates"):
                 with st.spinner("Fetching…"):
                     try:
@@ -207,7 +216,6 @@ else:
             if expiries:
                 chosen_expiry = col_e.selectbox("Expiry date", expiries)
 
-                # Load chain
                 if st.button("Load option chain"):
                     with st.spinner("Fetching chain…"):
                         try:
@@ -223,9 +231,9 @@ else:
 
                 if calls_df is not None:
                     cA, cB, cC, cD = st.columns([1.5, 1.5, 1.5, 1.5])
-                    leg_type = cA.selectbox("Option type", ["call", "put"], key="mkt_type")
-                    leg_pos  = cB.selectbox("Position", ["long", "short"], key="mkt_pos")
-                    leg_qty  = cC.number_input("Quantity", 1, 100, 1, key="mkt_qty")
+                    leg_type  = cA.selectbox("Option type", ["call", "put"], key="mkt_type")
+                    leg_pos   = cB.selectbox("Position", ["long", "short"], key="mkt_pos")
+                    leg_qty   = cC.number_input("Quantity", 1, 100, 1, key="mkt_qty")
                     price_src = cD.selectbox("Price source", ["mid", "bid", "ask", "lastPrice"],
                                              key="mkt_psrc")
 
@@ -246,10 +254,12 @@ else:
 
                     available_strikes = sorted(df_show["strike"].tolist())
                     chosen_strike = st.selectbox("Choose strike", available_strikes,
-                                                  key="mkt_strike")
+                                                 key="mkt_strike")
 
                     if st.button("Add this option leg"):
-                        prem = float(df_show[df_show["strike"] == chosen_strike][price_src].iloc[0])
+                        prem = float(
+                            df_show[df_show["strike"] == chosen_strike][price_src].iloc[0]
+                        )
                         _add_leg(dict(
                             type=leg_type,
                             pos=leg_pos,
@@ -266,7 +276,7 @@ else:
 # SECTION 2: Current legs table
 # ---------------------------------------------------------------------------
 
-st.header("2 · Legs Summary")
+st.header("2. Legs Summary")
 
 if not st.session_state.legs:
     st.info("No legs added yet. Use the panel above or load a preset.")
@@ -291,13 +301,17 @@ else:
     with col_del:
         st.write("")
         st.write("")
-        if st.button("🗑 Clear all legs"):
+        if st.button("Clear all legs"):
             _clear_legs()
             st.rerun()
 
-        remove_idx = st.number_input("Remove leg #", min_value=1,
-                                     max_value=max(len(st.session_state.legs), 1),
-                                     step=1, value=1)
+        remove_idx = st.number_input(
+            "Remove leg #",
+            min_value=1,
+            max_value=max(len(st.session_state.legs), 1),
+            step=1,
+            value=1,
+        )
         if st.button("Remove"):
             idx = int(remove_idx) - 1
             if 0 <= idx < len(st.session_state.legs):
@@ -306,25 +320,54 @@ else:
 
 
 # ---------------------------------------------------------------------------
-# SECTION 3: Plot settings
+# SECTION 3: Chart settings
 # ---------------------------------------------------------------------------
 
-st.header("3 · Chart Settings")
+st.header("3. Chart Settings")
 
-cs1, cs2, cs3, cs4 = st.columns(4)
-spot_lo   = cs1.number_input("Spot range — min",  value=50.0,  step=1.0)
-spot_hi   = cs2.number_input("Spot range — max",  value=150.0, step=1.0)
-n_points  = cs3.number_input("Resolution (pts)",  value=500,   step=50,
-                              min_value=100, max_value=2000)
-show_legs = cs4.checkbox("Show individual legs", value=True)
+cs1, cs2, cs3 = st.columns(3)
+
+auto_range = cs1.checkbox(
+    "Auto spot range",
+    value=True,
+    help=(
+        "Automatically sets the chart x-axis range based on the strikes in your strategy. "
+        "Uncheck to set the range manually."
+    ),
+)
+
+n_points = cs2.number_input(
+    "Resolution (pts)",
+    value=300,
+    step=50,
+    min_value=100,
+    max_value=2000,
+    help=(
+        "The number of price points computed along the x-axis. "
+        "A higher value produces a smoother payoff curve but takes slightly longer to render. "
+        "300 is sufficient for most strategies; increase to 1000+ only for very complex shapes."
+    ),
+)
+
+show_legs = cs3.checkbox("Show individual legs", value=True)
+
+# Compute or prompt for spot range
+if auto_range:
+    spot_lo, spot_hi = _compute_auto_range(st.session_state.legs)
+else:
+    default_lo, default_hi = _compute_auto_range(st.session_state.legs)
+    lo_col, hi_col = st.columns(2)
+    spot_lo = lo_col.number_input("Spot range — min", value=default_lo, step=1.0)
+    spot_hi = hi_col.number_input("Spot range — max", value=default_hi, step=1.0)
 
 use_realized = st.checkbox("Mark realized spot at maturity")
 realized_spot: float | None = None
 if use_realized:
     realized_spot = st.number_input(
         "Actual spot price at expiry",
-        value=100.0, step=0.5,
-        help="Enter the observed underlying price on the expiry date to see your realized P&L."
+        value=100.0,
+        step=0.5,
+        help="Enter the observed underlying price on the expiry date to see your realized P&L.",
     )
 
 spot_range = np.linspace(float(spot_lo), float(spot_hi), int(n_points))
@@ -334,44 +377,39 @@ spot_range = np.linspace(float(spot_lo), float(spot_hi), int(n_points))
 # SECTION 4: Build strategy & render
 # ---------------------------------------------------------------------------
 
-st.header("4 · Payoff Diagram")
+st.header("4. Payoff Diagram")
 
 if not st.session_state.legs:
     st.warning("Add at least one leg above.")
 else:
-    # Build Strategy from leg dicts
     strategy = Strategy(st.session_state.strategy_name)
     for L in st.session_state.legs:
         leg_type = L["type"]
-        pos  = L["pos"]
-        K    = float(L["K"])
-        prem = float(L.get("prem", 0.0))
-        qty  = int(L["qty"])
-        exp  = datetime.strptime(L["expiry"], "%Y-%m-%d").date()
+        pos    = L["pos"]
+        K      = float(L["K"])
+        prem   = float(L.get("prem", 0.0))
+        qty    = int(L["qty"])
+        exp    = datetime.strptime(L["expiry"], "%Y-%m-%d").date()
         ticker = L.get("ticker", "")
 
-        if leg_type == "stock (underlying)" or leg_type == "stock":
+        if leg_type in ("stock (underlying)", "stock"):
             lbl = f"{'Long' if pos == 'long' else 'Short'} {ticker+' ' if ticker else ''}Stock @ {K:.2f}"
             strategy.add_leg(StockPosition(K, pos, qty, label=lbl))
         else:
-            pos_s = "L" if pos == "long" else "S"
-            typ_s = "C" if leg_type == "call" else "P"
-            qty_s = f"x{qty} " if qty > 1 else ""
+            pos_s  = "L" if pos == "long" else "S"
+            typ_s  = "C" if leg_type == "call" else "P"
+            qty_s  = f"x{qty} " if qty > 1 else ""
             tick_s = f"{ticker} " if ticker else ""
-            label = f"{pos_s} {qty_s}{tick_s}{typ_s} K={K:.0f}"
-            strategy.add_leg(
-                Option(leg_type, pos, K, prem, exp, qty, label=label)
-            )
+            label  = f"{pos_s} {qty_s}{tick_s}{typ_s} K={K:.0f}"
+            strategy.add_leg(Option(leg_type, pos, K, prem, exp, qty, label=label))
 
-    # ── Summary metrics ──
+    # -- Summary metrics --
     summary = strategy.summary(spot_range)
     net = summary["net_premium"]
     m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Net Premium",
-              f"{'Credit' if net >= 0 else 'Debit'} {abs(net):.2f}",
-              delta=None)
-    m2.metric("Max Profit",  f"{summary['max_profit']:.2f}")
-    m3.metric("Max Loss",    f"{summary['max_loss']:.2f}")
+    m1.metric("Net Premium", f"{'Credit' if net >= 0 else 'Debit'} {abs(net):.2f}")
+    m2.metric("Max Profit", f"{summary['max_profit']:.2f}")
+    m3.metric("Max Loss",   f"{summary['max_loss']:.2f}")
     be = summary["breakeven_points"]
     m4.metric("Breakeven(s)", ", ".join(f"{b:.2f}" for b in be) if be else "None")
 
@@ -386,17 +424,16 @@ else:
             unsafe_allow_html=True,
         )
 
-    # ── Payoff chart ──
-    fig, _ = plot_payoff(
+    # -- Interactive Plotly chart --
+    fig = plot_payoff_plotly(
         strategy,
         spot_range,
         show_legs=show_legs,
         realized_spot=float(realized_spot) if use_realized and realized_spot is not None else None,
-        figsize=(12, 5.5),
     )
-    st.pyplot(fig)
+    st.plotly_chart(fig, use_container_width=True)
 
-    # ── Payoff table (optional) ──
+    # -- Raw payoff table (optional) --
     with st.expander("Raw payoff table"):
         import pandas as pd
         step = max(1, len(spot_range) // 50)
@@ -415,11 +452,14 @@ else:
 # SECTION 5: Compare strategies
 # ---------------------------------------------------------------------------
 
-with st.expander("📊 Compare multiple presets"):
+with st.expander("Compare multiple presets"):
     st.write("Select presets to overlay on a single chart.")
     preset_keys = [k for k in PRESETS if k != "— none —"]
-    chosen_presets = st.multiselect("Presets to compare", preset_keys,
-                                    default=["Bull Call Spread", "Bear Call Spread"])
+    chosen_presets = st.multiselect(
+        "Presets to compare",
+        preset_keys,
+        default=["Bull Call Spread", "Bear Call Spread"],
+    )
 
     if chosen_presets and st.button("Compare"):
         strats = []
@@ -444,7 +484,7 @@ with st.expander("📊 Compare multiple presets"):
 
 st.divider()
 st.caption(
-    "Built with [option_payoff](.) framework · "
-    "Prices shown are per-share (×100 for one standard contract) · "
+    "Built with the option_payoff framework · "
+    "Prices shown are per-share (x100 for one standard contract) · "
     "For educational purposes only — not financial advice."
 )

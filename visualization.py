@@ -11,6 +11,7 @@ from typing import Optional
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
 import numpy as np
+import plotly.graph_objects as go
 
 from core import Option, Strategy
 
@@ -251,6 +252,197 @@ def plot_multi_strategies(
 
     plt.tight_layout()
     return fig, ax
+
+
+def plot_payoff_plotly(
+    strategy: Strategy,
+    spot_range: Optional[np.ndarray] = None,
+    *,
+    show_legs: bool = True,
+    realized_spot: Optional[float] = None,
+    title: Optional[str] = None,
+) -> go.Figure:
+    """
+    Interactive Plotly payoff diagram with hover tooltips.
+
+    Hovering over the chart displays the underlying price and total P&L
+    at that point, plus each individual leg's P&L when show_legs is True.
+    """
+    if spot_range is None:
+        spot_range = strategy._auto_spot_range()
+
+    total_pnl = strategy.payoff_at_expiry(spot_range)
+    breakevens = strategy.breakeven_points(spot_range)
+
+    y_min = float(np.min(total_pnl))
+    y_max = float(np.max(total_pnl))
+    y_range = y_max - y_min or 1.0
+
+    fig = go.Figure()
+
+    # --- Profit fill zone (above zero) ---
+    fig.add_trace(go.Scatter(
+        x=spot_range,
+        y=np.clip(total_pnl, 0, None),
+        fill="tozeroy",
+        fillcolor="rgba(46,204,113,0.14)",
+        line=dict(width=0),
+        showlegend=False,
+        hoverinfo="skip",
+    ))
+
+    # --- Loss fill zone (below zero) ---
+    fig.add_trace(go.Scatter(
+        x=spot_range,
+        y=np.clip(total_pnl, None, 0),
+        fill="tozeroy",
+        fillcolor="rgba(231,76,60,0.12)",
+        line=dict(width=0),
+        showlegend=False,
+        hoverinfo="skip",
+    ))
+
+    # --- Individual legs (dashed) ---
+    if show_legs and len(strategy.legs) > 1:
+        for i, leg in enumerate(strategy.legs):
+            color = _PALETTE[i % len(_PALETTE)]
+            leg_pnl = leg.payoff_at_expiry(spot_range)
+            fig.add_trace(go.Scatter(
+                x=spot_range,
+                y=leg_pnl,
+                mode="lines",
+                line=dict(color=color, width=1.5, dash="dash"),
+                opacity=0.70,
+                name=leg.label,
+                hovertemplate="%{y:.2f}<extra>" + leg.label + "</extra>",
+            ))
+
+    # --- Total P&L line ---
+    fig.add_trace(go.Scatter(
+        x=spot_range,
+        y=total_pnl,
+        mode="lines",
+        line=dict(color="#1a252f", width=3),
+        name="Total P&L",
+        hovertemplate=(
+            "Spot: <b>%{x:.2f}</b><br>"
+            "P&L: <b>%{y:.2f}</b>"
+            "<extra>Total P&L</extra>"
+        ),
+    ))
+
+    # --- Zero line ---
+    fig.add_hline(y=0, line=dict(color="#95a5a6", width=1.2, dash="dash"))
+
+    # --- Strike vertical lines ---
+    seen: set[float] = set()
+    for leg in strategy.legs:
+        if isinstance(leg, Option) and leg.strike not in seen:
+            seen.add(leg.strike)
+            fig.add_vline(
+                x=leg.strike,
+                line=dict(color="#bdc3c7", width=1, dash="dot"),
+                annotation_text=f"K={leg.strike:.0f}",
+                annotation_position="bottom right",
+                annotation=dict(font=dict(size=13, color="#7f8c8d")),
+            )
+
+    # --- Breakeven markers ---
+    for be in breakevens:
+        fig.add_vline(
+            x=be,
+            line=dict(color="#e67e22", width=1.5, dash="dash"),
+        )
+        fig.add_annotation(
+            x=be,
+            y=y_max + y_range * 0.06,
+            text=f"<b>BE {be:.2f}</b>",
+            showarrow=False,
+            font=dict(size=13, color="#e67e22"),
+            bgcolor="rgba(255,255,255,0.85)",
+            bordercolor="#e67e22",
+            borderwidth=1,
+        )
+
+    # --- Realized spot marker ---
+    if realized_spot is not None:
+        pnl_realized = strategy.realized_payoff(realized_spot)
+        sign = "+" if pnl_realized >= 0 else ""
+        fig.add_vline(
+            x=realized_spot,
+            line=dict(color="#8e44ad", width=2, dash="dashdot"),
+        )
+        fig.add_trace(go.Scatter(
+            x=[realized_spot],
+            y=[pnl_realized],
+            mode="markers+text",
+            marker=dict(symbol="star", size=14, color="#8e44ad"),
+            text=[f"{sign}{pnl_realized:.2f}"],
+            textposition="top center",
+            textfont=dict(color="#8e44ad", size=11),
+            name=f"Realized S={realized_spot:.2f}",
+            hovertemplate=(
+                f"Realized spot: {realized_spot:.2f}<br>"
+                f"P&L: <b>{sign}{pnl_realized:.2f}</b>"
+                "<extra>Realized</extra>"
+            ),
+        ))
+
+    # --- Title & layout ---
+    net = strategy.net_premium()
+    net_str = f"Net {'Credit' if net >= 0 else 'Debit'}: {abs(net):.2f}"
+    plot_title = f"{title or strategy.name}   ·   {net_str}"
+
+    fig.update_layout(
+        title=dict(
+            text=plot_title,
+            font=dict(size=20, family="sans-serif"),
+            x=0.5,
+            xanchor="center",
+        ),
+        xaxis=dict(
+            title="Underlying Price at Expiry",
+            title_font=dict(size=15),
+            tickfont=dict(size=13),
+            tickformat=".2f",
+            showgrid=True,
+            gridcolor="rgba(0,0,0,0.07)",
+            zeroline=False,
+        ),
+        yaxis=dict(
+            title="Profit / Loss",
+            title_font=dict(size=15),
+            tickfont=dict(size=13),
+            tickformat=".2f",
+            showgrid=True,
+            gridcolor="rgba(0,0,0,0.07)",
+            zeroline=False,
+        ),
+        hovermode="x unified",
+        hoverlabel=dict(
+            bgcolor="white",
+            bordercolor="#cccccc",
+            font=dict(size=14),
+        ),
+        legend=dict(
+            orientation="v",
+            x=0.01,
+            y=0.99,
+            xanchor="left",
+            yanchor="top",
+            bgcolor="rgba(255,255,255,0.88)",
+            bordercolor="rgba(0,0,0,0.12)",
+            borderwidth=1,
+            font=dict(size=13),
+        ),
+        plot_bgcolor="white",
+        paper_bgcolor="white",
+        margin=dict(l=80, r=40, t=80, b=70),
+        height=650,
+        font=dict(size=15),
+    )
+
+    return fig
 
 
 def plot_payoff_grid(
