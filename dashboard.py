@@ -14,6 +14,7 @@ import os
 import json
 from pathlib import Path
 
+
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import warnings
@@ -25,6 +26,7 @@ import streamlit as st
 
 from core import Option, StockPosition, Strategy
 from visualization import plot_payoff_plotly, plot_multi_strategies
+from utils.export_pdf import export_pdf
 
 warnings.filterwarnings("ignore")
 
@@ -34,7 +36,7 @@ warnings.filterwarnings("ignore")
 
 st.set_page_config(
     page_title="Options Dashboard",
-    page_icon="📊",
+    page_icon=None,
     layout="wide",
 )
 
@@ -45,18 +47,31 @@ st.set_page_config(
 SAVED_CHARTS_DIR = Path(__file__).parent / "saved_charts"
 SAVED_CHARTS_DIR.mkdir(exist_ok=True)
 
+SAVED_PDFS_DIR = Path(__file__).parent / "saved_pdfs"
+SAVED_PDFS_DIR.mkdir(exist_ok=True)
+
 # ---------------------------------------------------------------------------
 # Sentiment options
 # ---------------------------------------------------------------------------
 
 SENTIMENT_OPTIONS = [
-    ("🐻🐻", "Very Bearish"),
-    ("🐻",   "Bearish"),
-    ("😐",   "Neutral"),
-    ("↔️",   "Directional"),
-    ("🐂",   "Bullish"),
-    ("🐂🐂", "Very Bullish"),
+    "Very Bearish",
+    "Bearish",
+    "Neutral",
+    "Directional",
+    "Bullish",
+    "Very Bullish",
 ]
+
+# Maps each sentiment to the 1-2 most fitting presets (must match keys in PRESETS)
+SENTIMENT_PRESETS: dict[str, list[str]] = {
+    "Very Bearish":  ["Bear Call Spread"],
+    "Bearish":       ["Bear Call Spread"],
+    "Neutral":       ["Iron Condor", "Long Call Butterfly"],
+    "Directional":   ["Long Straddle", "Long Strangle"],
+    "Bullish":       ["Bull Call Spread", "Long Call"],
+    "Very Bullish":  ["Long Call", "Bull Call Spread"],
+}
 
 # ---------------------------------------------------------------------------
 # Custom CSS — dark navy trading-platform aesthetic
@@ -209,6 +224,17 @@ def _clear_legs():
     st.session_state.legs = []
 
 
+@st.cache_data(ttl=3600)
+def _get_company_name(ticker: str) -> str:
+    """Return the long company name for a ticker via yfinance, or empty string."""
+    try:
+        import yfinance as yf
+        info = yf.Ticker(ticker).info
+        return info.get("longName") or info.get("shortName") or ""
+    except Exception:
+        return ""
+
+
 def _compute_auto_range(legs: list[dict], padding: float = 0.30) -> tuple[float, float]:
     ref_prices = [L["K"] for L in legs]
     if not ref_prices:
@@ -306,7 +332,7 @@ PRESETS = {
 # ---------------------------------------------------------------------------
 
 with st.sidebar:
-    st.markdown("### ⚙️ Settings")
+    st.markdown("### Settings")
 
     mode = st.radio(
         "Data source",
@@ -316,7 +342,7 @@ with st.sidebar:
 
     st.divider()
 
-    st.markdown("### 📋 Quick Presets")
+    st.markdown("### Quick Presets")
     preset_choice = st.selectbox("Preset", list(PRESETS.keys()), label_visibility="collapsed")
     if st.button("Load preset", use_container_width=True):
         preset = PRESETS[preset_choice]
@@ -329,7 +355,7 @@ with st.sidebar:
 # Page tabs
 # ---------------------------------------------------------------------------
 
-tab_dashboard, tab_saved = st.tabs(["📊 Dashboard", "🗃 Saved Charts"])
+tab_dashboard, tab_saved = st.tabs(["Dashboard", "Saved Charts"])
 
 # ===========================================================================
 # TAB: SAVED CHARTS
@@ -369,7 +395,7 @@ with tab_saved:
                 except Exception as e:
                     st.error(f"Could not render chart: {e}")
 
-                if st.button("🗑 Delete", key=f"del_{chart_data['_filename']}"):
+                if st.button("Delete", key=f"del_{chart_data['_filename']}"):
                     os.remove(chart_data["_filepath"])
                     st.rerun()
 
@@ -383,7 +409,7 @@ with tab_dashboard:
     # Header
     # -----------------------------------------------------------------------
 
-    st.markdown("## 📊 Options Dashboard")
+    st.markdown("## Options Dashboard")
 
     # -----------------------------------------------------------------------
     # Sentiment selector
@@ -392,13 +418,34 @@ with tab_dashboard:
     st.markdown('<div class="section-header">Market Sentiment</div>', unsafe_allow_html=True)
 
     sent_cols = st.columns(len(SENTIMENT_OPTIONS))
-    for i, (icon, label) in enumerate(SENTIMENT_OPTIONS):
+    for i, label in enumerate(SENTIMENT_OPTIONS):
         with sent_cols[i]:
             is_active = st.session_state.sentiment == label
             btn_type = "primary" if is_active else "secondary"
-            if st.button(f"{icon} {label}", key=f"sent_{label}", use_container_width=True, type=btn_type):
+            if st.button(label, key=f"sent_{label}", use_container_width=True, type=btn_type):
                 st.session_state.sentiment = label
                 st.rerun()
+
+    # Sentiment — strategy suggestions
+    _suggestions = [s for s in SENTIMENT_PRESETS.get(st.session_state.sentiment, [])
+                    if s in PRESETS]
+    if _suggestions:
+        st.markdown(
+            f'<div style="background:#1a2744;border:1px solid #2a3f6a;border-radius:8px;'
+            f'padding:10px 14px;margin:8px 0 4px 0;font-size:13px;color:#94a3b8;">'
+            f'<b style="color:#e2e8f0">{st.session_state.sentiment}</b> — '
+            f'suggested strategies: '
+            + " · ".join(f'<span style="color:#3b82f6">{s}</span>' for s in _suggestions)
+            + '</div>',
+            unsafe_allow_html=True,
+        )
+        _sug_cols = st.columns(len(_suggestions))
+        for _i, _s in enumerate(_suggestions):
+            with _sug_cols[_i]:
+                if st.button(f"Load {_s}", key=f"load_sug_{_s}", use_container_width=True):
+                    st.session_state.legs = [dict(l) for l in PRESETS[_s]]
+                    st.session_state.strategy_name = _s
+                    st.rerun()
 
     # -----------------------------------------------------------------------
     # Target price & budget
@@ -406,12 +453,21 @@ with tab_dashboard:
 
     tp_col, bud_col, _ = st.columns([1, 1, 2])
     target_price = tp_col.number_input(
-        "Target Price", min_value=0.0, value=0.0, step=1.0, format="%.2f",
-        help="Your target price for the underlying at expiry",
+        "Target Price",
+        min_value=0.0, value=0.0, step=1.0, format="%.2f",
+        help=(
+            "Where you expect the underlying to be at expiry. "
+            "Set above 0 to see a target marker on the payoff chart "
+            "and the expected P&L at that price."
+        ),
     )
     budget = bud_col.number_input(
-        "Max Budget ($)", min_value=0.0, value=0.0, step=10.0, format="%.0f",
-        help="Maximum amount you want to spend on premiums",
+        "Max Budget ($)",
+        min_value=0.0, value=0.0, step=10.0, format="%.0f",
+        help=(
+            "Maximum you are willing to pay in net premium (debit strategies). "
+            "A warning appears if the strategy cost exceeds this amount."
+        ),
     )
 
     st.divider()
@@ -591,38 +647,41 @@ with tab_dashboard:
     st.divider()
 
     # -----------------------------------------------------------------------
-    # Chart settings
+    # Chart settings (collapsible, collapsed by default)
     # -----------------------------------------------------------------------
 
-    st.markdown('<div class="section-header">Chart Settings</div>', unsafe_allow_html=True)
+    _realized_spot_input: float | None = None
 
-    cs1, cs2, cs3 = st.columns(3)
+    with st.expander("Chart Settings", expanded=False):
+        csa, csb = st.columns(2)
+        auto_range = csa.checkbox(
+            "Auto spot range", value=True,
+            help="Automatically sets chart x-axis from the legs' strikes. Uncheck to set manually.",
+        )
+        n_points = csb.number_input(
+            "Resolution (pts)", value=300, step=50, min_value=100, max_value=2000,
+            help="Number of price points along the x-axis. 300 is fine for most strategies.",
+        )
+        csc, csd = st.columns(2)
+        show_legs    = csc.checkbox("Show individual legs", value=True)
+        use_realized = csd.checkbox("Mark realized spot at maturity")
 
-    auto_range = cs1.checkbox(
-        "Auto spot range", value=True,
-        help="Automatically sets chart x-axis from the legs' strikes. Uncheck to set manually.",
-    )
-    n_points = cs2.number_input(
-        "Resolution (pts)", value=300, step=50, min_value=100, max_value=2000,
-        help="Number of price points along the x-axis. 300 is fine for most strategies.",
-    )
-    show_legs = cs3.checkbox("Show individual legs", value=True)
+        if not auto_range:
+            default_lo, default_hi = _compute_auto_range(st.session_state.legs)
+            lo_col, hi_col = st.columns(2)
+            spot_lo = lo_col.number_input("Spot range — min", value=default_lo, step=1.0)
+            spot_hi = hi_col.number_input("Spot range — max", value=default_hi, step=1.0)
+
+        if use_realized:
+            _realized_spot_input = st.number_input(
+                "Actual spot price at expiry", value=100.0, step=0.5,
+                help="Enter the observed underlying price on the expiry date to see your realized P&L.",
+            )
 
     if auto_range:
         spot_lo, spot_hi = _compute_auto_range(st.session_state.legs)
-    else:
-        default_lo, default_hi = _compute_auto_range(st.session_state.legs)
-        lo_col, hi_col = st.columns(2)
-        spot_lo = lo_col.number_input("Spot range — min", value=default_lo, step=1.0)
-        spot_hi = hi_col.number_input("Spot range — max", value=default_hi, step=1.0)
 
-    use_realized = st.checkbox("Mark realized spot at maturity")
-    realized_spot: float | None = None
-    if use_realized:
-        realized_spot = st.number_input(
-            "Actual spot price at expiry", value=100.0, step=0.5,
-            help="Enter the observed underlying price on the expiry date to see your realized P&L.",
-        )
+    realized_spot: float | None = _realized_spot_input
 
     spot_range = np.linspace(float(spot_lo), float(spot_hi), int(n_points))
 
@@ -671,6 +730,39 @@ with tab_dashboard:
         m3.metric("Max Loss",    f"{summary['max_loss']:.2f}")
         m4.metric("Breakeven(s)", ", ".join(f"{b:.2f}" for b in be) if be else "None")
 
+        # -- Budget check --
+        if budget > 0:
+            net_cost = abs(net) if net < 0 else 0.0
+            if net_cost == 0.0:
+                st.success(
+                    f"This is a net credit strategy (+{abs(net):.2f} received) — no budget consumed."
+                )
+            elif net_cost <= budget:
+                remaining = budget - net_cost
+                st.success(
+                    f"Within budget — net debit {net_cost:.2f} vs budget {budget:.0f} "
+                    f"({remaining:.2f} remaining)."
+                )
+            else:
+                overage = net_cost - budget
+                st.warning(
+                    f"Over budget — net debit {net_cost:.2f} exceeds budget {budget:.0f} "
+                    f"by {overage:.2f}."
+                )
+
+        # -- Target price P&L --
+        _tp = float(target_price) if target_price > 0 else None
+        if _tp is not None:
+            tpnl  = strategy.realized_payoff(_tp)
+            sign  = "+" if tpnl >= 0 else ""
+            color = "#22c55e" if tpnl >= 0 else "#ef4444"
+            st.markdown(
+                f"**P&L at target {_tp:.2f}:** "
+                f"<span style='color:{color}; font-size:1.3em; font-weight:bold'>"
+                f"{sign}{tpnl:.4f}</span>",
+                unsafe_allow_html=True,
+            )
+
         if use_realized and realized_spot is not None:
             rpnl  = strategy.realized_payoff(float(realized_spot))
             sign  = "+" if rpnl >= 0 else ""
@@ -688,15 +780,47 @@ with tab_dashboard:
             spot_range,
             show_legs=show_legs,
             realized_spot=float(realized_spot) if use_realized and realized_spot is not None else None,
+            target_price=_tp,
         )
         st.plotly_chart(fig, use_container_width=True)
 
-        # -- Save button --
-        save_col, _ = st.columns([1, 3])
+        # -- Action buttons (Save + Export PDF) --
+        save_col, export_col, _ = st.columns([1, 1, 2])
         with save_col:
-            if st.button("💾 Save Chart", type="primary", use_container_width=True):
+            if st.button("Save Chart", type="primary", use_container_width=True):
                 fname = save_chart(strategy, fig, spot_range, summary, fetched_ticker_for_save)
                 st.success(f"Saved! ({fname})")
+
+        with export_col:
+            if st.button("Export PDF", use_container_width=True):
+                with st.spinner("Generating report…"):
+                    _ticker_for_export = fetched_ticker_for_save or strategy.name
+                    _company = _get_company_name(_ticker_for_export) \
+                        if _ticker_for_export else ""
+                    _pdf_bytes, _tex_src, _fname_base = export_pdf(
+                        fig           = fig,
+                        ticker        = _ticker_for_export,
+                        strategy_name = strategy.name,
+                        legs          = st.session_state.legs,
+                        summary       = summary,
+                        strategy      = strategy,
+                        spot_range    = spot_range,
+                        company_name  = _company,
+                    )
+                _out_bytes = _pdf_bytes if _pdf_bytes is not None else _tex_src.encode("utf-8")
+                _out_ext   = ".pdf" if _pdf_bytes is not None else ".tex"
+                _out_fname = f"{_fname_base}{_out_ext}"
+                # Write to ~/Downloads (Dock) and to saved_pdfs/
+                _downloads_path = Path.home() / "Downloads" / _out_fname
+                _downloads_path.write_bytes(_out_bytes)
+                (SAVED_PDFS_DIR / _out_fname).write_bytes(_out_bytes)
+                if _pdf_bytes is not None:
+                    st.success(f"PDF saved to Downloads — {_out_fname}")
+                else:
+                    st.info(
+                        f".tex saved to Downloads (reportlab not installed). "
+                        f"Compile with: `pdflatex {_out_fname}`"
+                    )
 
         # -- Raw payoff table --
         with st.expander("Raw payoff table"):

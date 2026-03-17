@@ -260,6 +260,7 @@ def plot_payoff_plotly(
     *,
     show_legs: bool = True,
     realized_spot: Optional[float] = None,
+    target_price: Optional[float] = None,
     title: Optional[str] = None,
 ) -> go.Figure:
     """
@@ -385,6 +386,40 @@ def plot_payoff_plotly(
                 f"Realized spot: {realized_spot:.2f}<br>"
                 f"P&L: <b>{sign}{pnl_realized:.2f}</b>"
                 "<extra>Realized</extra>"
+            ),
+        ))
+
+    # --- Target price marker ---
+    if target_price is not None and float(spot_range[0]) <= target_price <= float(spot_range[-1]):
+        pnl_at_target = strategy.realized_payoff(target_price)
+        sign = "+" if pnl_at_target >= 0 else ""
+        fig.add_vline(
+            x=target_price,
+            line=dict(color="#22d3ee", width=2, dash="dash"),
+        )
+        fig.add_annotation(
+            x=target_price,
+            y=y_max + y_range * 0.06,
+            text=f"<b>Target {target_price:.2f}</b>",
+            showarrow=False,
+            font=dict(size=12, color="#22d3ee"),
+            bgcolor="rgba(13,27,42,0.85)",
+            bordercolor="#22d3ee",
+            borderwidth=1,
+        )
+        fig.add_trace(go.Scatter(
+            x=[target_price],
+            y=[pnl_at_target],
+            mode="markers+text",
+            marker=dict(symbol="diamond", size=12, color="#22d3ee"),
+            text=[f"{sign}{pnl_at_target:.2f}"],
+            textposition="top center",
+            textfont=dict(color="#22d3ee", size=11),
+            name=f"Target {target_price:.2f}",
+            hovertemplate=(
+                f"Target price: {target_price:.2f}<br>"
+                f"P&L at target: <b>{sign}{pnl_at_target:.2f}</b>"
+                "<extra>Target</extra>"
             ),
         ))
 
