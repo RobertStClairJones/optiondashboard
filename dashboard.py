@@ -336,7 +336,7 @@ with st.sidebar:
 
     mode = st.radio(
         "Data source",
-        ["Manual entry", "Live market data"],
+        ["Live market data", "Manual entry"],
         index=0,
     )
 
@@ -415,42 +415,62 @@ with tab_dashboard:
     # Sentiment selector
     # -----------------------------------------------------------------------
 
-    st.markdown('<div class="section-header">Market Sentiment</div>', unsafe_allow_html=True)
-
-    sent_cols = st.columns(len(SENTIMENT_OPTIONS))
-    for i, label in enumerate(SENTIMENT_OPTIONS):
-        with sent_cols[i]:
-            is_active = st.session_state.sentiment == label
-            btn_type = "primary" if is_active else "secondary"
-            if st.button(label, key=f"sent_{label}", use_container_width=True, type=btn_type):
-                st.session_state.sentiment = label
-                st.rerun()
-
-    # Sentiment — strategy suggestions
-    _suggestions = [s for s in SENTIMENT_PRESETS.get(st.session_state.sentiment, [])
-                    if s in PRESETS]
-    if _suggestions:
-        st.markdown(
-            f'<div style="background:#1a2744;border:1px solid #2a3f6a;border-radius:8px;'
-            f'padding:10px 14px;margin:8px 0 4px 0;font-size:13px;color:#94a3b8;">'
-            f'<b style="color:#e2e8f0">{st.session_state.sentiment}</b> — '
-            f'suggested strategies: '
-            + " · ".join(f'<span style="color:#3b82f6">{s}</span>' for s in _suggestions)
-            + '</div>',
-            unsafe_allow_html=True,
-        )
-        _sug_cols = st.columns(len(_suggestions))
-        for _i, _s in enumerate(_suggestions):
-            with _sug_cols[_i]:
-                if st.button(f"Load {_s}", key=f"load_sug_{_s}", use_container_width=True):
-                    st.session_state.legs = [dict(l) for l in PRESETS[_s]]
-                    st.session_state.strategy_name = _s
+    with st.expander("Market Sentiment", expanded=False):
+        sent_cols = st.columns(len(SENTIMENT_OPTIONS))
+        for i, label in enumerate(SENTIMENT_OPTIONS):
+            with sent_cols[i]:
+                is_active = st.session_state.sentiment == label
+                btn_type = "primary" if is_active else "secondary"
+                if st.button(label, key=f"sent_{label}", use_container_width=True, type=btn_type):
+                    st.session_state.sentiment = label
                     st.rerun()
 
+        # Sentiment — strategy suggestions (collapsed by default)
+        _suggestions = [s for s in SENTIMENT_PRESETS.get(st.session_state.sentiment, [])
+                        if s in PRESETS]
+        if _suggestions:
+            with st.expander("Strategy Suggestions", expanded=False):
+                st.markdown(
+                    f'<div style="background:#1a2744;border:1px solid #2a3f6a;border-radius:8px;'
+                    f'padding:10px 14px;margin:8px 0 4px 0;font-size:13px;color:#94a3b8;">'
+                    f'<b style="color:#e2e8f0">{st.session_state.sentiment}</b> — '
+                    f'suggested strategies: '
+                    + " · ".join(f'<span style="color:#3b82f6">{s}</span>' for s in _suggestions)
+                    + '</div>',
+                    unsafe_allow_html=True,
+                )
+                _sug_cols = st.columns(len(_suggestions))
+                for _i, _s in enumerate(_suggestions):
+                    with _sug_cols[_i]:
+                        if st.button(f"Load {_s}", key=f"load_sug_{_s}", use_container_width=True):
+                            st.session_state.legs = [dict(l) for l in PRESETS[_s]]
+                            st.session_state.strategy_name = _s
+                            st.rerun()
+
     # -----------------------------------------------------------------------
-    # Target price & budget
+    # Build strategy
     # -----------------------------------------------------------------------
 
+    st.markdown('<div class="section-header">Build Strategy</div>', unsafe_allow_html=True)
+
+    # 1. Strategy name
+    name_col, _ = st.columns([2, 2])
+    st.session_state.strategy_name = name_col.text_input(
+        "Strategy name",
+        value=st.session_state.strategy_name,
+        label_visibility="collapsed",
+        placeholder="Strategy name…",
+    )
+
+    # 2. Ticker symbol
+    ticker_col, _ = st.columns([2, 2])
+    ticker_input = ticker_col.text_input(
+        "Ticker symbol",
+        value=st.session_state.get("ticker", "AAPL"),
+        placeholder="AAPL, SPY, TSLA…",
+    ).upper()
+
+    # 3. Target price   4. Max budget
     tp_col, bud_col, _ = st.columns([1, 1, 2])
     target_price = tp_col.number_input(
         "Target Price",
@@ -468,22 +488,6 @@ with tab_dashboard:
             "Maximum you are willing to pay in net premium (debit strategies). "
             "A warning appears if the strategy cost exceeds this amount."
         ),
-    )
-
-    st.divider()
-
-    # -----------------------------------------------------------------------
-    # Build strategy
-    # -----------------------------------------------------------------------
-
-    st.markdown('<div class="section-header">Build Strategy</div>', unsafe_allow_html=True)
-
-    name_col, _ = st.columns([2, 2])
-    st.session_state.strategy_name = name_col.text_input(
-        "Strategy name",
-        value=st.session_state.strategy_name,
-        label_visibility="collapsed",
-        placeholder="Strategy name…",
     )
 
     # -- Manual entry ---------------------------------------------------------
@@ -525,11 +529,6 @@ with tab_dashboard:
 
         if market_ok:
             with st.expander("🌐 Fetch from market", expanded=True):
-                col_t, col_e = st.columns([2, 2])
-                ticker_input = col_t.text_input(
-                    "Ticker symbol", value="AAPL", placeholder="AAPL, SPY, TSLA…"
-                ).upper()
-
                 if st.button("Fetch expiry dates", type="primary"):
                     with st.spinner("Fetching…"):
                         try:
@@ -547,7 +546,7 @@ with tab_dashboard:
                     st.info(f"**{fetched_ticker}** spot price: **{spot:.2f}**")
 
                 if expiries:
-                    chosen_expiry = col_e.selectbox("Expiry date", expiries, label_visibility="collapsed")
+                    chosen_expiry = st.selectbox("Expiry date", expiries, label_visibility="collapsed")
 
                     if st.button("Load option chain"):
                         with st.spinner("Fetching chain…"):
@@ -721,6 +720,9 @@ with tab_dashboard:
 
         # -- Summary metrics --
         summary = strategy.summary(spot_range)
+        _spot = st.session_state.get("spot")
+        if _spot is not None:
+            summary["current_spot"] = float(_spot)
         net = summary["net_premium"]
         be  = summary["breakeven_points"]
 
@@ -781,6 +783,7 @@ with tab_dashboard:
             show_legs=show_legs,
             realized_spot=float(realized_spot) if use_realized and realized_spot is not None else None,
             target_price=_tp,
+            current_spot=summary.get("current_spot"),
         )
         st.plotly_chart(fig, use_container_width=True)
 
@@ -806,6 +809,7 @@ with tab_dashboard:
                         strategy      = strategy,
                         spot_range    = spot_range,
                         company_name  = _company,
+                        target_price  = _tp,
                     )
                 _out_bytes = _pdf_bytes if _pdf_bytes is not None else _tex_src.encode("utf-8")
                 _out_ext   = ".pdf" if _pdf_bytes is not None else ".tex"

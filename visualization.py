@@ -261,6 +261,7 @@ def plot_payoff_plotly(
     show_legs: bool = True,
     realized_spot: Optional[float] = None,
     target_price: Optional[float] = None,
+    current_spot: Optional[float] = None,
     title: Optional[str] = None,
 ) -> go.Figure:
     """
@@ -315,21 +316,33 @@ def plot_payoff_plotly(
                 line=dict(color=color, width=1.5, dash="dash"),
                 opacity=0.70,
                 name=leg.label,
-                hovertemplate="%{y:.2f}<extra>" + leg.label + "</extra>",
+                hoverinfo="skip",
             ))
 
     # --- Total P&L line ---
+    if current_spot is not None and current_spot > 0:
+        _move_pct = ((spot_range - current_spot) / current_spot) * 100
+        _hover_tpl = (
+            "Spot Price: <b>$%{x:.2f}</b><br>"
+            "P&L: <b>$%{y:.2f}</b><br>"
+            "Move Required: <b>%{customdata:+.2f}%</b>"
+            "<extra></extra>"
+        )
+    else:
+        _move_pct = None
+        _hover_tpl = (
+            "Spot Price: <b>$%{x:.2f}</b><br>"
+            "P&L: <b>$%{y:.2f}</b>"
+            "<extra></extra>"
+        )
     fig.add_trace(go.Scatter(
         x=spot_range,
         y=total_pnl,
         mode="lines",
         line=dict(color="#e2e8f0", width=2.5),
         name="Total P&L",
-        hovertemplate=(
-            "Spot: <b>%{x:.2f}</b><br>"
-            "P&L: <b>%{y:.2f}</b>"
-            "<extra>Total P&L</extra>"
-        ),
+        customdata=_move_pct,
+        hovertemplate=_hover_tpl,
     ))
 
     # --- Zero line ---
@@ -349,16 +362,26 @@ def plot_payoff_plotly(
             )
 
     # --- Breakeven markers ---
-    for be in breakevens:
+    for idx, be in enumerate(breakevens):
         fig.add_vline(
             x=be,
             line=dict(color="#e67e22", width=1.5, dash="dash"),
         )
+        # Alternate label heights to prevent overlap when multiple breakevens are close
+        label_y = y_max + y_range * (0.10 + 0.16 * (idx % 2))
         fig.add_annotation(
             x=be,
-            y=y_max + y_range * 0.06,
+            y=0,
+            ax=be,
+            ay=label_y,
+            axref="x",
+            ayref="y",
             text=f"<b>BE {be:.2f}</b>",
-            showarrow=False,
+            showarrow=True,
+            arrowhead=2,
+            arrowsize=1,
+            arrowwidth=1.5,
+            arrowcolor="#e67e22",
             font=dict(size=12, color="#f59e0b"),
             bgcolor="rgba(13,27,42,0.85)",
             bordercolor="#f59e0b",
@@ -382,11 +405,7 @@ def plot_payoff_plotly(
             textposition="top center",
             textfont=dict(color="#8e44ad", size=11),
             name=f"Realized S={realized_spot:.2f}",
-            hovertemplate=(
-                f"Realized spot: {realized_spot:.2f}<br>"
-                f"P&L: <b>{sign}{pnl_realized:.2f}</b>"
-                "<extra>Realized</extra>"
-            ),
+            hoverinfo="skip",
         ))
 
     # --- Target price marker ---
@@ -416,11 +435,7 @@ def plot_payoff_plotly(
             textposition="top center",
             textfont=dict(color="#22d3ee", size=11),
             name=f"Target {target_price:.2f}",
-            hovertemplate=(
-                f"Target price: {target_price:.2f}<br>"
-                f"P&L at target: <b>{sign}{pnl_at_target:.2f}</b>"
-                "<extra>Target</extra>"
-            ),
+            hoverinfo="skip",
         ))
 
     # --- Title & layout ---
@@ -455,7 +470,7 @@ def plot_payoff_plotly(
             zeroline=False,
             linecolor="rgba(255,255,255,0.1)",
         ),
-        hovermode="x unified",
+        hovermode="closest",
         hoverlabel=dict(
             bgcolor="#1e3a5f",
             bordercolor="#3b82f6",

@@ -51,7 +51,8 @@ def _fmt_metric(val: float, inf_str: str = "Unlimited") -> str:
     return _usd(val)
 
 
-def _chart_png_matplotlib(strategy, spot_range, tmpdir: str) -> str | None:
+def _chart_png_matplotlib(strategy, spot_range, tmpdir: str,
+                          target_price=None, current_spot=None) -> str | None:
     """Render a clean print-ready payoff chart via matplotlib."""
     try:
         import matplotlib
@@ -73,6 +74,7 @@ def _chart_png_matplotlib(strategy, spot_range, tmpdir: str) -> str | None:
         C_ZERO    = "#94a3b8"   # zero reference
         C_STRIKE  = "#cbd5e1"   # strike dotted
         C_BE      = "#b45309"   # breakeven amber
+        C_TARGET  = "#0e7490"   # target teal
         C_AXIS    = "#334155"
         C_GRID    = "#f1f5f9"
         PALETTE   = ["#2563eb","#7c3aed","#ea580c","#059669","#db2777"]
@@ -113,17 +115,48 @@ def _chart_png_matplotlib(strategy, spot_range, tmpdir: str) -> str | None:
                         f"K={leg.strike:.0f}", fontsize=7.5,
                         color="#64748b", ha="center", va="bottom")
 
-        # Breakevens
-        for be in strategy.breakeven_points(spot_range):
+        # Breakevens — callout arrows with alternating heights to avoid overlap
+        y_top = float(np.max(total_pnl))
+        y_bot = float(np.min(total_pnl))
+        y_rng = y_top - y_bot or 1.0
+        for idx, be in enumerate(strategy.breakeven_points(spot_range)):
             ax.axvline(be, color=C_BE, linewidth=1.3, linestyle="--", zorder=4)
-            y_top = float(np.max(total_pnl))
-            y_rng = y_top - float(np.min(total_pnl)) or 1.0
-            ax.annotate(f"BE ${be:.2f}",
-                        xy=(be, y_top + y_rng * 0.04),
-                        ha="center", fontsize=8, color=C_BE,
-                        fontweight="bold",
-                        bbox=dict(boxstyle="round,pad=0.25", fc="white",
-                                  ec=C_BE, lw=0.8))
+            text_y = y_top + y_rng * (0.10 + 0.14 * (idx % 2))
+            ax.annotate(
+                f"BE ${be:.2f}",
+                xy=(be, 0),
+                xytext=(be, text_y),
+                ha="center", va="bottom",
+                fontsize=8, color=C_BE, fontweight="bold",
+                bbox=dict(boxstyle="round,pad=0.25", fc="white", ec=C_BE, lw=0.8),
+                arrowprops=dict(arrowstyle="-|>", color=C_BE, lw=0.9,
+                                shrinkA=3, shrinkB=3),
+                zorder=6,
+            )
+
+        # Target price annotation
+        if target_price is not None and float(spot_range[0]) <= target_price <= float(spot_range[-1]):
+            ax.axvline(target_price, color=C_TARGET, linewidth=1.5,
+                       linestyle="--", zorder=4)
+            if current_spot is not None and current_spot > 0:
+                pct = ((target_price - current_spot) / current_spot) * 100
+                sign = "+" if pct >= 0 else ""
+                tp_label = f"Target: ${target_price:.2f} ({sign}{pct:.2f}%)"
+            else:
+                tp_label = f"Target: ${target_price:.2f}"
+            pnl_at_target = float(strategy.realized_payoff(target_price))
+            tp_text_y = y_top + y_rng * 0.30
+            ax.annotate(
+                tp_label,
+                xy=(target_price, pnl_at_target),
+                xytext=(target_price, tp_text_y),
+                ha="center", va="bottom",
+                fontsize=8, color=C_TARGET, fontweight="bold",
+                bbox=dict(boxstyle="round,pad=0.25", fc="white", ec=C_TARGET, lw=0.8),
+                arrowprops=dict(arrowstyle="-|>", color=C_TARGET, lw=0.9,
+                                shrinkA=3, shrinkB=3),
+                zorder=6,
+            )
 
         # Formatting
         ax.set_xlabel("Underlying Spot Price at Expiry", fontsize=10,
@@ -437,15 +470,19 @@ def export_pdf(
     strategy=None,
     spot_range=None,
     company_name: str = "",
+    target_price=None,
 ) -> tuple[bytes | None, str, str]:
     today = date.today()
     safe_name   = strategy_name.replace(" ", "_").replace("/", "-")
     safe_ticker = (ticker or "STRATEGY").upper()
     filename_base = f"{safe_ticker}_{safe_name}_{today.strftime('%Y-%m-%d')}"
+    _current_spot = summary.get("current_spot") if summary else None
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        chart_png = _chart_png_matplotlib(strategy, spot_range, tmpdir) \
-            if strategy is not None else None
+        chart_png = _chart_png_matplotlib(
+            strategy, spot_range, tmpdir,
+            target_price=target_price, current_spot=_current_spot,
+        ) if strategy is not None else None
 
         try:
             pdf_bytes = _build_reportlab_pdf(
