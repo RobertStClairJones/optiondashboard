@@ -1,0 +1,334 @@
+/* ─────────────────────────────────────────────────────────────
+   OPTIONS TERMINAL  ·  Bloomberg-style TUI
+   Palette: black bg, amber text, green profit, red loss,
+            cyan selected, yellow breakeven
+   ───────────────────────────────────────────────────────────── */
+
+/* ── Screen ── */
+Screen {
+    background: #000000;
+    color: #FF8C00;
+    layers: default;
+}
+
+/* ── Header / Footer ── */
+Header {
+    background: #FF8C00;
+    color: #000000;
+    text-style: bold;
+    height: 1;
+}
+
+Footer {
+    background: #1a0800;
+    color: #FF8C00;
+    height: 1;
+}
+
+/* ── Tabs ── */
+TabbedContent {
+    height: 1fr;
+}
+
+TabbedContent > TabPane {
+    padding: 0;
+    background: #000000;
+}
+
+Tabs {
+    background: #0d0500;
+    border-bottom: solid #FF4500;
+    height: 2;
+}
+
+Tab {
+    background: #0d0500;
+    color: #886040;
+    padding: 0 2;
+}
+
+Tab:hover {
+    background: #1a0a00;
+    color: #FF8C00;
+}
+
+Tab.-active {
+    background: #000000;
+    color: #00E5FF;
+    border-top: solid #00E5FF;
+    text-style: bold;
+}
+
+/* ── Layout panels ── */
+#left-panel {
+    width: 36;
+    border-right: solid #2a1500;
+    background: #000000;
+    overflow-y: scroll;
+    scrollbar-color: #FF4500 #0d0500;
+    scrollbar-size: 1 1;
+}
+
+#right-panel {
+    background: #000000;
+}
+
+/* ── Section labels ── */
+.section-label {
+    background: #0d0500;
+    color: #00E5FF;
+    text-style: bold;
+    padding: 0 1;
+    margin-top: 1;
+    height: 1;
+}
+
+/* ── Inputs ── */
+Input {
+    background: #0a0400;
+    border: solid #4a2800;
+    color: #FF8C00;
+    height: 3;
+}
+
+Input:focus {
+    border: solid #00E5FF;
+    color: #FFFFFF;
+    background: #001018;
+}
+
+Input.-invalid {
+    border: solid #FF3333;
+    color: #FF3333;
+}
+
+/* ── Select ── */
+Select {
+    background: #0a0400;
+    border: solid #4a2800;
+    color: #FF8C00;
+    height: 3;
+}
+
+Select:focus {
+    border: solid #00E5FF;
+}
+
+SelectOverlay {
+    background: #0d0500;
+    border: solid #FF8C00;
+}
+
+SelectOverlay > OptionList {
+    background: #0d0500;
+    color: #FF8C00;
+}
+
+SelectOverlay > OptionList > .option-list--option-highlighted {
+    background: #00E5FF;
+    color: #000000;
+}
+
+/* ── Buttons ── */
+Button {
+    background: #0d0500;
+    border: solid #FF4500;
+    color: #FF8C00;
+    height: 3;
+    min-width: 8;
+}
+
+Button:hover {
+    background: #FF4500;
+    color: #000000;
+    text-style: bold;
+}
+
+Button:focus {
+    border: solid #00E5FF;
+}
+
+Button.-primary {
+    background: #FF8C00;
+    border: solid #FFB347;
+    color: #000000;
+    text-style: bold;
+}
+
+Button.-primary:hover {
+    background: #FFB347;
+}
+
+Button#clear-btn {
+    border: solid #FF3333;
+    color: #FF3333;
+}
+
+Button#clear-btn:hover {
+    background: #FF3333;
+    color: #000000;
+}
+
+Button#save-btn {
+    border: solid #00E5FF;
+    color: #00E5FF;
+}
+
+Button#save-btn:hover {
+    background: #00E5FF;
+    color: #000000;
+}
+
+Button#pdf-btn {
+    border: solid #FFE000;
+    color: #FFE000;
+}
+
+Button#pdf-btn:hover {
+    background: #FFE000;
+    color: #000000;
+}
+
+/* ── Metrics bar ── */
+#metrics-bar {
+    height: 5;
+    background: #050200;
+    border-bottom: solid #2a1500;
+}
+
+.metric-box {
+    border: solid #2a1500;
+    background: #080400;
+    padding: 0 1;
+    width: 1fr;
+    height: 5;
+    align: center middle;
+    content-align: center middle;
+}
+
+.metric-title {
+    color: #664400;
+    text-style: bold;
+    height: 1;
+}
+
+.metric-value {
+    color: #FF8C00;
+    text-style: bold;
+    height: 1;
+}
+
+.metric-profit {
+    color: #00FF41;
+    text-style: bold;
+}
+
+.metric-loss {
+    color: #FF3333;
+    text-style: bold;
+}
+
+.metric-be {
+    color: #FFE000;
+    text-style: bold;
+}
+
+/* ── Chart ── */
+#chart-container {
+    border: solid #2a1500;
+    background: #000000;
+    height: 1fr;
+    margin: 0;
+    overflow: hidden;
+}
+
+/* ── Action row ── */
+#action-row {
+    height: 3;
+    background: #000000;
+    padding: 0 1;
+    align: left middle;
+}
+
+/* ── Status bar ── */
+#status-bar {
+    height: 1;
+    background: #0a0500;
+    color: #664400;
+    padding: 0 1;
+}
+
+/* ── DataTable ── */
+DataTable {
+    background: #000000;
+    color: #FF8C00;
+    height: auto;
+    max-height: 12;
+    border: solid #2a1500;
+}
+
+DataTable > .datatable--header {
+    background: #1a0800;
+    color: #00E5FF;
+    text-style: bold;
+}
+
+DataTable > .datatable--cursor {
+    background: #00E5FF;
+    color: #000000;
+    text-style: bold;
+}
+
+DataTable > .datatable--odd-row {
+    background: #050200;
+}
+
+DataTable > .datatable--even-row {
+    background: #000000;
+}
+
+/* ── Saved charts panel ── */
+#saved-list {
+    background: #000000;
+    border: solid #2a1500;
+    height: 1fr;
+}
+
+#saved-detail {
+    background: #050200;
+    border-left: solid #2a1500;
+    height: 1fr;
+    padding: 1;
+    overflow-y: auto;
+}
+
+/* ── Live data panel ── */
+#live-form {
+    width: 40;
+    border-right: solid #2a1500;
+    padding: 1;
+}
+
+#chain-panel {
+    height: 1fr;
+}
+
+/* ── Label ── */
+Label {
+    color: #664400;
+    height: 1;
+}
+
+/* ── Rule ── */
+Rule {
+    color: #2a1500;
+    margin: 0;
+}
+
+/* ── Log / status messages ── */
+#status-msg {
+    height: 1;
+    color: #664400;
+    background: #050200;
+    padding: 0 1;
+}
