@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>name</key>
+	<string>OptionsTerminal</string>
+
+	<!-- ── Window geometry ── -->
+	<key>columnCount</key>
+	<integer>220</integer>
+	<key>rowCount</key>
+	<integer>55</integer>
+
+	<!-- ── Font ── -->
+	<key>fontName</key>
+	<string>MesloLGS-NR-Regular</string>
+	<key>fontSize</key>
+	<real>15</real>
+
+	<!-- ── Colours ── -->
+	<key>backgroundColor</key>
+	<dict>
+		<key>$class</key>
+		<string>NSColor</string>
+		<key>NSColorSpace</key>
+		<integer>1</integer>
+		<!-- #0A0A0A  r=0.039 g=0.039 b=0.039 -->
+		<key>NSComponents</key>
+		<string>0.039216 0.039216 0.039216 1</string>
+	</dict>
+
+	<key>textColor</key>
+	<dict>
+		<key>$class</key>
+		<string>NSColor</string>
+		<key>NSColorSpace</key>
+		<integer>1</integer>
+		<!-- #FF8C00  r=1.0 g=0.549 b=0.0 -->
+		<key>NSComponents</key>
+		<string>1.000000 0.549020 0.000000 1</string>
+	</dict>
+
+	<key>cursorColor</key>
+	<dict>
+		<key>$class</key>
+		<string>NSColor</string>
+		<key>NSColorSpace</key>
+		<integer>1</integer>
+		<!-- amber cursor -->
+		<key>NSComponents</key>
+		<string>1.000000 0.549020 0.000000 1</string>
+	</dict>
+
+	<!-- ── Behaviour ── -->
+	<!-- 0 = close window, 1 = don't close, 2 = only if process exited cleanly -->
+	<key>shellExitAction</key>
+	<integer>0</integer>
+
+	<key>useOptionAsMetaKey</key>
+	<true/>
+	<key>scrollbackLines</key>
+	<integer>10000</integer>
+	<key>cleanCommands</key>
+	<string></string>
+</dict>
+</plist>

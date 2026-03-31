@@ -41,6 +41,11 @@ Tabs {
     height: 2;
 }
 
+/* Hide the built-in sliding underline — it bleeds into content */
+Tabs Underline {
+    display: none;
+}
+
 Tab {
     background: #0d0500;
     color: #886040;
@@ -52,10 +57,10 @@ Tab:hover {
     color: #FF8C00;
 }
 
+/* Active tab: amber fill + black text — no border line needed */
 Tab.-active {
-    background: #000000;
-    color: #00E5FF;
-    border-top: solid #00E5FF;
+    background: #FF8C00;
+    color: #000000;
     text-style: bold;
 }
 
@@ -102,29 +107,46 @@ Input.-invalid {
     color: #FF3333;
 }
 
-/* ── Select ── */
+/* ── Select (Textual 8.x: border/color live on SelectCurrent, not Select) ── */
 Select {
+    height: auto;
     background: #0a0400;
-    border: solid #4a2800;
     color: #FF8C00;
-    height: 3;
 }
 
-Select:focus {
-    border: solid #00E5FF;
+/* The visible "current value" box */
+SelectCurrent {
+    border: tall #4a2800;
+    background: #0a0400;
+    color: #FF8C00;
+    height: auto;
+    padding: 0 2;
 }
 
+/* Label inside SelectCurrent — override Textual's default 50%-opacity colour */
+SelectCurrent > Static#label {
+    color: #FF8C00;
+    background: transparent;
+}
+
+SelectCurrent.-has-value > Static#label {
+    color: #FF8C00;
+}
+
+/* Focus state */
+Select:focus > SelectCurrent {
+    border: tall #00E5FF;
+    background: #001018;
+}
+
+/* Drop-down overlay */
 SelectOverlay {
     background: #0d0500;
     border: solid #FF8C00;
-}
-
-SelectOverlay > OptionList {
-    background: #0d0500;
     color: #FF8C00;
 }
 
-SelectOverlay > OptionList > .option-list--option-highlighted {
+SelectOverlay > .option-list--option-highlighted {
     background: #00E5FF;
     color: #000000;
 }
@@ -305,12 +327,74 @@ DataTable > .datatable--even-row {
 /* ── Live data panel ── */
 #live-form {
     width: 40;
+    height: 1fr;
     border-right: solid #2a1500;
     padding: 1;
+    overflow-y: auto;
+}
+
+#live-right-panel {
+    height: 1fr;
+    background: #000000;
 }
 
 #chain-panel {
-    height: 1fr;
+    height: auto;
+    border-bottom: solid #2a1500;
+}
+
+.cost-info {
+    height: 1;
+    color: #FF8C00;
+    background: #050200;
+    padding: 0 1;
+}
+
+#live-action-row {
+    height: 3;
+    background: #000000;
+    padding: 0 1;
+    align: left middle;
+}
+
+Button#live-save-btn {
+    border: solid #00E5FF;
+    color: #00E5FF;
+}
+
+Button#live-save-btn:hover {
+    background: #00E5FF;
+    color: #000000;
+}
+
+Button#live-pdf-btn {
+    border: solid #FFE000;
+    color: #FFE000;
+}
+
+Button#live-pdf-btn:hover {
+    background: #FFE000;
+    color: #000000;
+}
+
+.danger-btn {
+    border: solid #FF3333;
+    color: #FF3333;
+}
+
+.danger-btn:hover {
+    background: #FF3333;
+    color: #000000;
+}
+
+Button#live-remove-btn {
+    border: solid #FF8C00;
+    color: #FF8C00;
+}
+
+Button#live-remove-btn:hover {
+    background: #FF8C00;
+    color: #000000;
 }
 
 /* ── Label ── */

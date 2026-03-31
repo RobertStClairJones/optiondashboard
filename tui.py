@@ -12,8 +12,10 @@ Imports and calls functions directly from:
 """
 from __future__ import annotations
 
+import argparse
 import json
 import os
+import subprocess
 import sys
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -322,10 +324,19 @@ class LiveDataTab(Horizontal):
 
     def compose(self) -> ComposeResult:
         with VerticalScroll(id="live-form"):
+            yield Label("STRATEGY NAME", classes="section-label")
+            yield Input(placeholder="Strategy name…",
+                        value="Custom Strategy", id="live-inp-name")
+
             yield Label("LIVE MARKET DATA", classes="section-label")
             yield Input(placeholder="Ticker (AAPL, SPY…)", id="live-ticker")
             yield Button("Fetch Expiries", id="btn-fetch", variant="primary")
             yield Static("", id="live-spot-label")
+
+            yield Label("TARGET PRICE", classes="section-label")
+            yield Input(placeholder="Target Price (e.g. 155.00)", id="live-target")
+            yield Label("BUDGET", classes="section-label")
+            yield Input(placeholder="Max Budget (e.g. 500.00)", id="live-budget")
 
             yield Label("EXPIRY", classes="section-label")
             yield Select([], id="sel-expiry", allow_blank=True)
@@ -333,8 +344,10 @@ class LiveDataTab(Horizontal):
             yield Rule()
 
             yield Label("ADD TO STRATEGY", classes="section-label")
+            yield Label("OPTION TYPE", classes="section-label")
             yield Select([("call","call"),("put","put")],
                          value="call", id="live-opt-type")
+            yield Label("DIRECTION", classes="section-label")
             yield Select([("long","long"),("short","short")],
                          value="long", id="live-opt-pos")
             yield Select([("mid","mid"),("bid","bid"),("ask","ask"),("lastPrice","lastPrice")],
@@ -345,9 +358,27 @@ class LiveDataTab(Horizontal):
             yield Button("Add Live Leg", id="btn-live-add", variant="primary")
             yield Static("", id="live-status")
 
-        with Vertical(id="chain-panel"):
-            yield Label("OPTION CHAIN", classes="section-label")
-            yield DataTable(id="chain-table", cursor_type="row")
+            yield Rule()
+            yield Label("STRATEGY LEGS", classes="section-label")
+            yield DataTable(id="live-legs-table", cursor_type="row")
+            with Horizontal():
+                yield Button("Clear All", id="live-clear-btn", classes="danger-btn")
+                yield Button("Remove Leg", id="live-remove-btn")
+
+        with Vertical(id="live-right-panel"):
+            # ── Option chain (upper section) ─────────────────────────────
+            with Vertical(id="chain-panel"):
+                yield Label("OPTION CHAIN", classes="section-label")
+                yield DataTable(id="chain-table", cursor_type="row")
+
+            # ── Payoff diagram + metrics (lower section) ─────────────────
+            yield MetricsBar(id="live-metrics-bar")
+            yield Static("", id="live-cost-info", classes="cost-info")
+            yield ChartWidget(id="live-chart-widget")
+            with Horizontal(id="live-action-row"):
+                yield Button("Save", id="live-save-btn")
+                yield Button("Export PDF", id="live-pdf-btn")
+                yield Static("", id="live-action-status")
 
 
 class SavedTab(Horizontal):
@@ -500,9 +531,17 @@ class OptionsTUI(App[None]):
         Binding("ctrl+s", "action_save",         "Save"),
         Binding("ctrl+p", "action_pdf",          "PDF"),
         Binding("ctrl+r", "action_refresh_chart","Refresh"),
+        Binding("ctrl+n", "new_window",          "New Window"),
         Binding("f5",     "action_refresh_chart","Refresh",   show=False),
         Binding("question_mark", "show_help",    "Help"),
     ]
+
+    def __init__(self, ticker: str = "", session_name: str = "") -> None:
+        super().__init__()
+        self._cli_ticker       = ticker.strip().upper()
+        self._cli_session_name = session_name.strip()
+        self.target_price: float | None = None
+        self.budget:       float | None = None
 
     # ── reactive state ──────────────────────────────────────────────────────
     legs: reactive[list[dict]] = reactive(list, always_update=True)
@@ -519,10 +558,10 @@ class OptionsTUI(App[None]):
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
         with TabbedContent(id="tabs"):
-            with TabPane("DASHBOARD", id="tab-dashboard"):
-                yield DashboardTab()
             with TabPane("LIVE DATA", id="tab-live"):
                 yield LiveDataTab()
+            with TabPane("MANUAL ENTRY", id="tab-dashboard"):
+                yield DashboardTab()
             with TabPane("SAVED", id="tab-saved"):
                 yield SavedTab()
             with TabPane("? HELP", id="tab-help"):
@@ -534,6 +573,9 @@ class OptionsTUI(App[None]):
         legs_tbl: DataTable = self.query_one("#legs-table")
         legs_tbl.add_columns("#", "Type", "Pos", "Strike", "Prem", "Qty", "Expiry")
 
+        live_legs_tbl: DataTable = self.query_one("#live-legs-table")
+        live_legs_tbl.add_columns("#", "Type", "Pos", "Strike", "Prem", "Qty", "Expiry")
+
         chain_tbl: DataTable = self.query_one("#chain-table")
         chain_tbl.add_columns("Strike", "Bid", "Mid", "Ask", "IV", "OI", "Vol")
 
@@ -541,20 +583,28 @@ class OptionsTUI(App[None]):
         saved_tbl.add_columns("Strategy", "Ticker", "Date Saved")
         self._refresh_saved_table()
 
+        # Apply CLI arguments
+        if self._cli_session_name:
+            self.title = self._cli_session_name
+        if self._cli_ticker:
+            self.query_one("#inp-ticker", Input).value = self._cli_ticker
+            self.query_one("#live-ticker", Input).value = self._cli_ticker
+
     # ── Legs helpers ─────────────────────────────────────────────────────────
     def _refresh_legs_table(self) -> None:
-        tbl: DataTable = self.query_one("#legs-table")
-        tbl.clear()
-        for i, L in enumerate(self.legs, 1):
-            tbl.add_row(str(i), L["type"], L["pos"],
-                        f"{float(L['K']):.2f}",
-                        f"{float(L.get('prem',0)):.2f}",
-                        str(L["qty"]), L["expiry"])
+        for tbl_id in ("#legs-table", "#live-legs-table"):
+            tbl: DataTable = self.query_one(tbl_id)
+            tbl.clear()
+            for i, L in enumerate(self.legs, 1):
+                tbl.add_row(str(i), L["type"], L["pos"],
+                            f"{float(L['K']):.2f}",
+                            f"{float(L.get('prem',0)):.2f}",
+                            str(L["qty"]), L["expiry"])
 
     def _rebuild_and_render(self) -> None:
         if not self.legs:
-            self.query_one(ChartWidget).update(
-                RichText(" No legs — add at least one leg.", style=C_AMBER))
+            for cw in self.query(ChartWidget):
+                cw.update(RichText(" No legs — add at least one leg.", style=C_AMBER))
             return
         name     = self.query_one("#inp-name", Input).value.strip() or "Strategy"
         strategy = _build_strategy(name, self.legs)
@@ -562,8 +612,37 @@ class OptionsTUI(App[None]):
         summary  = strategy.summary(spot_arr)
         if self._live_spot:
             summary["current_spot"] = self._live_spot
-        self.query_one(MetricsBar).update_metrics(summary)
-        self.query_one(ChartWidget).refresh_chart(strategy)
+
+        # Update Dashboard tab widgets
+        self.query_one("#metrics-bar",    MetricsBar).update_metrics(summary)
+        self.query_one("#chart-widget",   ChartWidget).refresh_chart(strategy)
+
+        # Update Live Data tab widgets (always in sync)
+        self.query_one("#live-metrics-bar", MetricsBar).update_metrics(summary)
+        self.query_one("#live-chart-widget", ChartWidget).refresh_chart(strategy)
+        self._update_cost_info(summary)
+
+    def _update_cost_info(self, summary: dict) -> None:
+        """Show net cost per contract and remaining budget in the Live Data panel."""
+        net    = summary.get("net_premium", 0.0)
+        cost_c = net * 100           # per standard 100-share contract
+
+        parts: list[str] = []
+        if self.budget is not None:
+            net_debit = -cost_c if cost_c < 0 else 0.0   # only count what we pay
+            remaining = self.budget + cost_c              # budget minus debit paid
+            r_style   = C_GREEN if remaining >= 0 else C_RED
+            parts.append(f"Budget: ${self.budget:,.2f}")
+            parts.append(f"Net Cost/contract: {'DR' if cost_c < 0 else 'CR'} ${abs(cost_c):.2f}")
+            t = RichText()
+            t.append("  " + "  |  ".join(parts), style=C_AMBER)
+            t.append(f"  |  Remaining: ${remaining:,.2f}", style=r_style)
+        else:
+            direction = "DR" if cost_c < 0 else "CR"
+            t = RichText(
+                f"  Net Cost/contract: {direction} ${abs(cost_c):.2f}", style=C_AMBER
+            )
+        self.query_one("#live-cost-info", Static).update(t)
 
     # ── Dashboard button handlers ─────────────────────────────────────────────
     @on(Button.Pressed, "#btn-load-preset")
@@ -647,7 +726,7 @@ class OptionsTUI(App[None]):
         name     = self.query_one("#inp-name",   Input).value.strip() or "Strategy"
         ticker   = self.query_one("#inp-ticker", Input).value.strip().upper() or name
         target_s = self.query_one("#inp-target", Input).value.strip()
-        target   = float(target_s) if target_s else None
+        target   = float(target_s) if target_s else self.target_price
 
         strategy = _build_strategy(name, self.legs)
         spot_arr = strategy._auto_spot_range()
@@ -678,6 +757,89 @@ class OptionsTUI(App[None]):
             f"{label} → ~/Downloads/{out_fname}", C_GREEN,
         )
 
+    @on(Button.Pressed, "#live-save-btn")
+    def handle_live_save(self) -> None:
+        if not self.legs:
+            self._set_live_action_status("No legs to save.", C_RED)
+            return
+        name     = self.query_one("#live-inp-name", Input).value.strip() or "Strategy"
+        ticker   = self.query_one("#live-ticker",   Input).value.strip().upper()
+        strategy = _build_strategy(name, self.legs)
+        spot_arr = strategy._auto_spot_range()
+        summary  = strategy.summary(spot_arr)
+        if self._live_spot:
+            summary["current_spot"] = self._live_spot
+        fname = _save_chart_file(strategy, self.legs, summary, ticker)
+        self._refresh_saved_table()
+        self._set_live_action_status(f"Saved: {fname}", C_GREEN)
+
+    @on(Button.Pressed, "#live-clear-btn")
+    def handle_live_clear(self) -> None:
+        self.legs = []
+        self._refresh_legs_table()
+        for cw in self.query(ChartWidget):
+            cw.update(RichText(" No legs — add at least one leg.", style=C_AMBER))
+        self.query_one("#live-cost-info", Static).update(RichText(""))
+        self._set_live_status("All legs cleared.")
+
+    @on(Button.Pressed, "#live-remove-btn")
+    def handle_live_remove(self) -> None:
+        tbl: DataTable = self.query_one("#live-legs-table")
+        row = tbl.cursor_row
+        if 0 <= row < len(self.legs):
+            removed = self.legs[row]
+            self.legs = [L for i, L in enumerate(self.legs) if i != row]
+            self._refresh_legs_table()
+            self._rebuild_and_render()
+            self._set_live_status(
+                f"Removed leg {row+1}: {removed['type']} K={removed['K']}")
+        else:
+            self._set_live_status("Select a row in the legs table first.")
+
+    @on(Button.Pressed, "#live-pdf-btn")
+    def handle_live_pdf(self) -> None:
+        if not self.legs:
+            self._set_live_action_status("No legs to export.", C_RED)
+            return
+        self._set_live_action_status("Generating PDF…", C_YELLOW)
+        self._do_export_live_pdf()
+
+    @work(thread=True)
+    def _do_export_live_pdf(self) -> None:
+        name   = self.query_one("#live-inp-name", Input).value.strip() or "Strategy"
+        ticker = self.query_one("#live-ticker",   Input).value.strip().upper() or name
+        target = self.target_price
+
+        strategy = _build_strategy(name, self.legs)
+        spot_arr = strategy._auto_spot_range()
+        summary  = strategy.summary(spot_arr)
+        if self._live_spot:
+            summary["current_spot"] = self._live_spot
+
+        pdf_bytes, tex_src, fname_base = export_pdf(
+            fig           = None,
+            ticker        = ticker,
+            strategy_name = name,
+            legs          = self.legs,
+            summary       = summary,
+            strategy      = strategy,
+            spot_range    = spot_arr,
+            target_price  = target,
+        )
+
+        out_bytes = pdf_bytes if pdf_bytes is not None else tex_src.encode()
+        out_ext   = ".pdf" if pdf_bytes is not None else ".tex"
+        out_fname = f"{fname_base}{out_ext}"
+        dl_path   = Path.home() / "Downloads" / out_fname
+        dl_path.write_bytes(out_bytes)
+        (SAVED_PDFS_DIR / out_fname).write_bytes(out_bytes)
+
+        label = "PDF" if pdf_bytes else ".tex"
+        self.app.call_from_thread(
+            self._set_live_action_status,
+            f"{label} → ~/Downloads/{out_fname}", C_GREEN,
+        )
+
     # ── Live data handlers ─────────────────────────────────────────────────
     @on(Button.Pressed, "#btn-fetch")
     def handle_fetch(self) -> None:
@@ -702,10 +864,13 @@ class OptionsTUI(App[None]):
                     RichText(f" {ticker} spot: {spot:.2f}", style=C_GREEN))
                 sel: Select = self.query_one("#sel-expiry")
                 sel.set_options([(e, e) for e in expiries])
+                sel.refresh()
                 if expiries:
                     sel.value = expiries[0]
                     self._live_expiry = expiries[0]
-                self._set_live_status(f"Fetched {len(expiries)} expiries.")
+                    self._set_live_status(f"Fetched {len(expiries)} expiries.")
+                else:
+                    self._set_live_status(f"No expiries found for {ticker}.")
             self.app.call_from_thread(_update)
         except Exception as exc:
             self.app.call_from_thread(self._set_live_status, f"Error: {exc}")
@@ -751,6 +916,15 @@ class OptionsTUI(App[None]):
         tbl.clear()
         cols = [c for c in ["strike","bid","mid","ask","impliedVolatility","openInterest","volume"]
                 if c in df.columns]
+
+        def _int(v) -> str:
+            """Convert to int string; return '—' for NaN/None/non-numeric."""
+            try:
+                f = float(v)
+                return str(int(f)) if f == f else "—"   # f != f  ⟹  NaN
+            except (TypeError, ValueError):
+                return "—"
+
         for _, row in df[cols].iterrows():
             tbl.add_row(
                 f"{row['strike']:.2f}",
@@ -758,9 +932,23 @@ class OptionsTUI(App[None]):
                 f"{row.get('mid',0):.2f}",
                 f"{row.get('ask',0):.2f}",
                 f"{row.get('impliedVolatility',0):.1%}" if "impliedVolatility" in row else "—",
-                str(int(row.get("openInterest", 0))),
-                str(int(row.get("volume", 0))),
+                _int(row.get("openInterest", 0)),
+                _int(row.get("volume", 0)),
             )
+
+    @on(Input.Changed, "#live-target")
+    def handle_live_target_changed(self, event: Input.Changed) -> None:
+        try:
+            self.target_price = float(event.value) if event.value.strip() else None
+        except ValueError:
+            self.target_price = None
+
+    @on(Input.Changed, "#live-budget")
+    def handle_live_budget_changed(self, event: Input.Changed) -> None:
+        try:
+            self.budget = float(event.value) if event.value.strip() else None
+        except ValueError:
+            self.budget = None
 
     @on(Select.Changed, "#live-opt-type")
     def handle_chain_type(self, event: Select.Changed) -> None:
@@ -800,6 +988,10 @@ class OptionsTUI(App[None]):
                  expiry=self._live_expiry, ticker=ticker)
         ]
         self.query_one("#inp-ticker", Input).value = ticker
+        # Sync live name to Dashboard so _rebuild_and_render uses it
+        live_name = self.query_one("#live-inp-name", Input).value.strip()
+        if live_name:
+            self.query_one("#inp-name", Input).value = live_name
         self._refresh_legs_table()
         self._rebuild_and_render()
         self._set_live_status(f"Added {pos} {opt_type} K={strike:.2f} prem={prem:.2f} ({src})")
@@ -864,6 +1056,17 @@ class OptionsTUI(App[None]):
     def action_show_help(self) -> None:
         self.query_one("#tabs", TabbedContent).active = "tab-help"
 
+    def action_new_window(self) -> None:
+        self.spawn_new_window()
+
+    def spawn_new_window(self) -> None:
+        """Launch a fresh TUI instance in a new terminal window via launch.py."""
+        launch_py = Path(__file__).parent / "launch.py"
+        subprocess.Popen(
+            [sys.executable, str(launch_py)],
+            start_new_session=True,
+        )
+
     # ── Status helpers ──────────────────────────────────────────────────────
     def _set_status(self, msg: str) -> None:
         self.query_one("#status-msg", Static).update(
@@ -877,9 +1080,19 @@ class OptionsTUI(App[None]):
         self.query_one("#live-status", Static).update(
             RichText(f" {msg}", style=C_AMBER))
 
+    def _set_live_action_status(self, msg: str, style: str = C_AMBER) -> None:
+        self.query_one("#live-action-status", Static).update(
+            RichText(f"  {msg}", style=style))
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Entry point
 # ═══════════════════════════════════════════════════════════════════════════════
 if __name__ == "__main__":
-    OptionsTUI().run()
+    parser = argparse.ArgumentParser(description="OPTIONS TERMINAL — payoff analysis")
+    parser.add_argument("--session-name", default="",
+                        help="Set the window/app title (e.g. 'AAPL Iron Condor')")
+    parser.add_argument("--ticker", default="",
+                        help="Pre-populate the ticker input on startup")
+    args = parser.parse_args()
+    OptionsTUI(ticker=args.ticker, session_name=args.session_name).run()
