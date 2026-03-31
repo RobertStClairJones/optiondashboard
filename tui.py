@@ -2,12 +2,11 @@
 tui.py
 ------
 Bloomberg-style terminal dashboard for option payoff analysis.
-Replaces: streamlit run dashboard.py
 Run with: python tui.py
 
-Imports and calls functions directly from:
-  core.py             – Option, StockPosition, Strategy
-  market_data.py      – get_spot_price, get_available_expiries, get_options_chain
+Imports from:
+  core/engine.py      – Option, StockPosition, Strategy
+  core/market_data.py – get_spot_price, get_available_expiries, get_options_chain
   utils/export_pdf.py – export_pdf
 """
 from __future__ import annotations
@@ -41,10 +40,10 @@ from core import Option, StockPosition, Strategy
 from utils.export_pdf import export_pdf
 
 # ── Paths ────────────────────────────────────────────────────────────────────
-SAVED_CHARTS_DIR = Path(__file__).parent / "saved_charts"
-SAVED_CHARTS_DIR.mkdir(exist_ok=True)
-SAVED_PDFS_DIR = Path(__file__).parent / "saved_pdfs"
-SAVED_PDFS_DIR.mkdir(exist_ok=True)
+SAVED_CHARTS_DIR = Path(__file__).parent / "data" / "saved_charts"
+SAVED_CHARTS_DIR.mkdir(parents=True, exist_ok=True)
+SAVED_PDFS_DIR = Path(__file__).parent / "data" / "saved_pdfs"
+SAVED_PDFS_DIR.mkdir(parents=True, exist_ok=True)
 
 # ── Presets (mirrored from dashboard.py) ─────────────────────────────────────
 PRESETS: dict[str, list[dict] | None] = {
@@ -95,6 +94,118 @@ PRESETS: dict[str, list[dict] | None] = {
         dict(type="put",   pos="long", K=95.0,  prem=2.0, qty=1, expiry="2025-06-20"),
     ],
 }
+
+# ── Monetary formatter ────────────────────────────────────────────────────────
+
+def _fmt_money(v: float, inf_str: str = "Unlimited") -> str:
+    """Format a P&L value as $X,XXX.XX; handle ±inf gracefully."""
+    if v == float("inf"):   return inf_str
+    if v == float("-inf"):  return f"-{inf_str}"
+    return f"${v:,.2f}"
+
+
+# ── Analytical max-profit / max-loss ──────────────────────────────────────────
+
+def _analytical_max_profit_loss(legs: list[dict]) -> tuple[float | None, float | None]:
+    """
+    Return (max_profit, max_loss) analytically for recognised strategy types.
+    Values are per-share (matching core.py payoff_at_expiry convention).
+    float('inf') / float('-inf') = unlimited.
+    Returns (None, None) to signal caller should keep the numeric-scan result.
+    """
+    opts   = [L for L in legs if L.get("type") in ("call", "put")]
+    stocks = [L for L in legs if L.get("type") in ("stock", "stock (underlying)")]
+
+    def _nc() -> float:
+        """Net credit of all legs (+ve = receive premium, -ve = pay)."""
+        t = 0.0
+        for L in legs:
+            p, q = float(L.get("prem", 0.0)), int(L.get("qty", 1))
+            t += p * q if L.get("pos") == "short" else -p * q
+        return t
+
+    # ── Single option ────────────────────────────────────────────────────────
+    if len(legs) == 1 and len(opts) == 1:
+        L = opts[0]
+        K, p, q, pos, ot = (float(L["K"]), float(L.get("prem", 0.0)),
+                             int(L.get("qty", 1)), L["pos"], L["type"])
+        if   ot == "call" and pos == "long":  return float("inf"),       -p * q
+        elif ot == "call" and pos == "short": return  p * q,              float("-inf")
+        elif ot == "put"  and pos == "long":  return (K - p) * q,        -p * q
+        elif ot == "put"  and pos == "short": return  p * q,             -(K - p) * q
+
+    # ── 2-leg, options only ──────────────────────────────────────────────────
+    if len(legs) == 2 and len(opts) == 2 and not stocks:
+        c_legs = sorted([L for L in opts if L["type"] == "call"], key=lambda L: float(L["K"]))
+        p_legs = sorted([L for L in opts if L["type"] == "put"],  key=lambda L: float(L["K"]))
+
+        if len(c_legs) == 2:                               # both calls
+            lo, hi = c_legs;  q = int(lo.get("qty", 1))
+            if lo["pos"] == "long"  and hi["pos"] == "short":   # bull call spread
+                nd = float(lo["prem"]) - float(hi["prem"])
+                return (float(hi["K"]) - float(lo["K"]) - nd) * q, -nd * q
+            if lo["pos"] == "short" and hi["pos"] == "long":    # bear call spread
+                nc_v = float(lo["prem"]) - float(hi["prem"])
+                return nc_v * q, -(float(hi["K"]) - float(lo["K"]) - nc_v) * q
+
+        if len(p_legs) == 2:                               # both puts
+            lo, hi = p_legs;  q = int(lo.get("qty", 1))
+            if hi["pos"] == "long"  and lo["pos"] == "short":   # bear put spread
+                nd = float(hi["prem"]) - float(lo["prem"])
+                return (float(hi["K"]) - float(lo["K"]) - nd) * q, -nd * q
+            if hi["pos"] == "short" and lo["pos"] == "long":    # bull put spread
+                nc_v = float(hi["prem"]) - float(lo["prem"])
+                return nc_v * q, -(float(hi["K"]) - float(lo["K"]) - nc_v) * q
+
+        if len(c_legs) == 1 and len(p_legs) == 1:         # call + put
+            c, p = c_legs[0], p_legs[0];  q = int(c.get("qty", 1))
+            if c["pos"] == "long"  and p["pos"] == "long":   # long straddle/strangle
+                return float("inf"), -(float(c["prem"]) + float(p["prem"])) * q
+            if c["pos"] == "short" and p["pos"] == "short":  # short straddle/strangle
+                return (float(c["prem"]) + float(p["prem"])) * q, float("-inf")
+
+    # ── 3-leg butterfly ──────────────────────────────────────────────────────
+    if len(legs) == 3 and len(opts) == 3 and not stocks:
+        lo, mid, hi = sorted(opts, key=lambda L: float(L["K"]))
+        q = int(lo.get("qty", 1))
+        if (lo["pos"] == "long" and mid["pos"] == "short"
+                and int(mid.get("qty", 1)) == 2 and hi["pos"] == "long"):
+            nd = _nc()   # nd is negative (net debit)
+            return (float(mid["K"]) - float(lo["K"]) + nd) * q, nd * q
+
+    # ── 4-leg iron condor ────────────────────────────────────────────────────
+    if len(legs) == 4 and len(opts) == 4 and not stocks:
+        c_s = sorted([L for L in opts if L["type"] == "call"], key=lambda L: float(L["K"]))
+        p_s = sorted([L for L in opts if L["type"] == "put"],  key=lambda L: float(L["K"]))
+        if len(c_s) == 2 and len(p_s) == 2:
+            p_lo, p_hi = p_s;  c_lo, c_hi = c_s
+            if (p_lo["pos"] == "long"  and p_hi["pos"] == "short" and
+                c_lo["pos"] == "short" and c_hi["pos"] == "long"):
+                nc_v   = _nc()
+                put_w  = float(p_hi["K"]) - float(p_lo["K"])
+                call_w = float(c_hi["K"]) - float(c_lo["K"])
+                return nc_v, -(max(put_w, call_w) - nc_v)
+
+    # ── Covered call ─────────────────────────────────────────────────────────
+    if len(legs) == 2 and len(opts) == 1 and len(stocks) == 1:
+        c_l = [L for L in opts if L["type"] == "call" and L["pos"] == "short"]
+        if c_l and stocks[0]["pos"] == "long":
+            c, s = c_l[0], stocks[0]
+            q = int(c.get("qty", 1))
+            return ((float(c["K"]) - float(s["K"]) + float(c.get("prem", 0))) * q,
+                    -(float(s["K"]) - float(c.get("prem", 0))) * q)
+
+    # ── Protective put ───────────────────────────────────────────────────────
+    if len(legs) == 2 and len(opts) == 1 and len(stocks) == 1:
+        p_l = [L for L in opts if L["type"] == "put" and L["pos"] == "long"]
+        if p_l and stocks[0]["pos"] == "long":
+            p, s = p_l[0], stocks[0]
+            q = int(p.get("qty", 1))
+            return (float("inf"),
+                    -(float(s["K"]) - float(p["K"]) + float(p.get("prem", 0))) * q)
+
+    return None, None   # unrecognised — caller keeps numeric-scan result
+
 
 # ── Bloomberg colour palette ──────────────────────────────────────────────────
 C_AMBER  = "#FF8C00"
@@ -159,11 +270,13 @@ def _render_chart(strategy: Strategy, width: int, height: int) -> RichText:
         above = [v if v >= 0 else float("nan") for v in pnls]
         below = [v if v <  0 else float("nan") for v in pnls]
 
+        # Draw order matters in plotext: last plot wins per pixel.
+        # Orange baseline first, then green profit on top, red loss on top last.
+        plt.plot(spots, pnls,  color="orange", label="P&L")
         if any(v == v for v in above):   # nan != nan
             plt.plot(spots, above, color="green", label="Profit")
         if any(v == v for v in below):
             plt.plot(spots, below, color="red",   label="Loss")
-        plt.plot(spots, pnls, color="orange", label="Total P&L")
 
         plt.hline(0, color=239)
         for be in strategy.breakeven_points(spot_range):
@@ -240,15 +353,17 @@ class MetricsBar(Horizontal):
 
         self.query_one("#m-net").update(
             _cell("NET PREMIUM",
-                  f"{'CR' if net >= 0 else 'DR'} {abs(net):.2f}",
+                  f"{'CR' if net >= 0 else 'DR'} ${abs(net):,.2f}",
                   C_GREEN if net >= 0 else C_RED))
         self.query_one("#m-profit").update(
-            _cell("MAX PROFIT", f"{max_p:.2f}", C_GREEN if max_p > 0 else C_AMBER))
+            _cell("MAX PROFIT", _fmt_money(max_p),
+                  C_GREEN if max_p > 0 else C_AMBER))
         self.query_one("#m-loss").update(
-            _cell("MAX LOSS",   f"{max_l:.2f}", C_RED   if max_l < 0 else C_AMBER))
+            _cell("MAX LOSS",   _fmt_money(max_l),
+                  C_RED   if max_l < 0 else C_AMBER))
         self.query_one("#m-be").update(
             _cell("BREAKEVEN(S)",
-                  "  ".join(f"{b:.2f}" for b in be) if be else "—",
+                  "  ".join(f"${b:,.2f}" for b in be) if be else "—",
                   C_YELLOW))
 
 
@@ -309,6 +424,7 @@ class DashboardTab(Horizontal):
 
         with Vertical(id="right-panel"):
             yield MetricsBar(id="metrics-bar")
+            yield Static("", id="target-info",  classes="target-info")
             yield Static("", id="status-msg")
             yield ChartWidget(id="chart-widget")
             with Horizontal(id="action-row"):
@@ -373,7 +489,8 @@ class LiveDataTab(Horizontal):
 
             # ── Payoff diagram + metrics (lower section) ─────────────────
             yield MetricsBar(id="live-metrics-bar")
-            yield Static("", id="live-cost-info", classes="cost-info")
+            yield Static("", id="live-target-info", classes="target-info")
+            yield Static("", id="live-cost-info",   classes="cost-info")
             yield ChartWidget(id="live-chart-widget")
             with Horizontal(id="live-action-row"):
                 yield Button("Save", id="live-save-btn")
@@ -605,6 +722,9 @@ class OptionsTUI(App[None]):
         if not self.legs:
             for cw in self.query(ChartWidget):
                 cw.update(RichText(" No legs — add at least one leg.", style=C_AMBER))
+            for wid in ("#target-info", "#live-target-info"):
+                try: self.query_one(wid, Static).update(RichText(""))
+                except Exception: pass
             return
         name     = self.query_one("#inp-name", Input).value.strip() or "Strategy"
         strategy = _build_strategy(name, self.legs)
@@ -613,36 +733,54 @@ class OptionsTUI(App[None]):
         if self._live_spot:
             summary["current_spot"] = self._live_spot
 
+        # Override with analytical max-profit / max-loss where possible
+        ana_p, ana_l = _analytical_max_profit_loss(self.legs)
+        if ana_p is not None:
+            summary["max_profit"] = ana_p
+        if ana_l is not None:
+            summary["max_loss"] = ana_l
+
         # Update Dashboard tab widgets
-        self.query_one("#metrics-bar",    MetricsBar).update_metrics(summary)
-        self.query_one("#chart-widget",   ChartWidget).refresh_chart(strategy)
+        self.query_one("#metrics-bar",     MetricsBar).update_metrics(summary)
+        self.query_one("#chart-widget",    ChartWidget).refresh_chart(strategy)
 
         # Update Live Data tab widgets (always in sync)
-        self.query_one("#live-metrics-bar", MetricsBar).update_metrics(summary)
+        self.query_one("#live-metrics-bar",  MetricsBar).update_metrics(summary)
         self.query_one("#live-chart-widget", ChartWidget).refresh_chart(strategy)
         self._update_cost_info(summary)
+        self._update_target_info(strategy)
 
     def _update_cost_info(self, summary: dict) -> None:
-        """Show net cost per contract and remaining budget in the Live Data panel."""
+        """Show net cost per contract (and budget) in the Live Data panel."""
         net    = summary.get("net_premium", 0.0)
-        cost_c = net * 100           # per standard 100-share contract
-
-        parts: list[str] = []
+        cost_c = net * 100  # per standard 100-share contract
+        direction = "DR" if cost_c < 0 else "CR"
+        t = RichText()
         if self.budget is not None:
-            net_debit = -cost_c if cost_c < 0 else 0.0   # only count what we pay
-            remaining = self.budget + cost_c              # budget minus debit paid
-            r_style   = C_GREEN if remaining >= 0 else C_RED
-            parts.append(f"Budget: ${self.budget:,.2f}")
-            parts.append(f"Net Cost/contract: {'DR' if cost_c < 0 else 'CR'} ${abs(cost_c):.2f}")
-            t = RichText()
-            t.append("  " + "  |  ".join(parts), style=C_AMBER)
-            t.append(f"  |  Remaining: ${remaining:,.2f}", style=r_style)
-        else:
-            direction = "DR" if cost_c < 0 else "CR"
-            t = RichText(
-                f"  Net Cost/contract: {direction} ${abs(cost_c):.2f}", style=C_AMBER
-            )
+            t.append(f"  Budget: ${self.budget:,.2f}  |  ", style=C_AMBER)
+        t.append(f"Net Cost/contract: {direction} ${abs(cost_c):,.2f}", style=C_AMBER)
         self.query_one("#live-cost-info", Static).update(t)
+
+    def _update_target_info(self, strategy: Strategy) -> None:
+        """Compute and display Profit @ Target and Move Required."""
+        if self.target_price is None:
+            for wid in ("#target-info", "#live-target-info"):
+                try: self.query_one(wid, Static).update(RichText(""))
+                except Exception: pass
+            return
+        pnl  = strategy.realized_payoff(self.target_price)
+        spot = self._live_spot or 0.0
+        t = RichText()
+        t.append(f"  Profit @ Target Price (${self.target_price:,.2f}): ", style=C_DIM)
+        t.append(_fmt_money(pnl), style=C_GREEN if pnl >= 0 else C_RED)
+        if spot > 0:
+            pct  = ((self.target_price - spot) / spot) * 100
+            sign = "+" if pct >= 0 else ""
+            t.append("   Move Required: ", style=C_DIM)
+            t.append(f"{sign}{pct:.2f}%", style=C_CYAN)
+        for wid in ("#target-info", "#live-target-info"):
+            try: self.query_one(wid, Static).update(t)
+            except Exception: pass
 
     # ── Dashboard button handlers ─────────────────────────────────────────────
     @on(Button.Pressed, "#btn-load-preset")
@@ -732,16 +870,37 @@ class OptionsTUI(App[None]):
         spot_arr = strategy._auto_spot_range()
         summary  = strategy.summary(spot_arr)
 
+        # Apply analytical override so PDF matches TUI metrics bar
+        ana_p, ana_l = _analytical_max_profit_loss(self.legs)
+        if ana_p is not None:
+            summary["max_profit"] = ana_p
+        if ana_l is not None:
+            summary["max_loss"] = ana_l
+
+        # Compute target analysis for PDF
+        profit_at_target = None
+        pct_move         = None
+        if target is not None:
+            try:
+                profit_at_target = strategy.realized_payoff(target)
+                spot = summary.get("current_spot")
+                if spot and spot > 0:
+                    pct_move = ((target - spot) / spot) * 100
+            except Exception:
+                pass
+
         # export_pdf imported from utils/export_pdf.py
         pdf_bytes, tex_src, fname_base = export_pdf(
-            fig           = None,
-            ticker        = ticker,
-            strategy_name = name,
-            legs          = self.legs,
-            summary       = summary,
-            strategy      = strategy,
-            spot_range    = spot_arr,
-            target_price  = target,
+            fig                = None,
+            ticker             = ticker,
+            strategy_name      = name,
+            legs               = self.legs,
+            summary            = summary,
+            strategy           = strategy,
+            spot_range         = spot_arr,
+            target_price       = target,
+            profit_at_target   = profit_at_target,
+            pct_move_to_target = pct_move,
         )
 
         out_bytes = pdf_bytes if pdf_bytes is not None else tex_src.encode()
@@ -816,15 +975,36 @@ class OptionsTUI(App[None]):
         if self._live_spot:
             summary["current_spot"] = self._live_spot
 
+        # Apply analytical override so PDF matches TUI metrics bar
+        ana_p, ana_l = _analytical_max_profit_loss(self.legs)
+        if ana_p is not None:
+            summary["max_profit"] = ana_p
+        if ana_l is not None:
+            summary["max_loss"] = ana_l
+
+        # Compute target analysis for PDF
+        profit_at_target = None
+        pct_move         = None
+        if target is not None:
+            try:
+                profit_at_target = strategy.realized_payoff(target)
+                spot = summary.get("current_spot")
+                if spot and spot > 0:
+                    pct_move = ((target - spot) / spot) * 100
+            except Exception:
+                pass
+
         pdf_bytes, tex_src, fname_base = export_pdf(
-            fig           = None,
-            ticker        = ticker,
-            strategy_name = name,
-            legs          = self.legs,
-            summary       = summary,
-            strategy      = strategy,
-            spot_range    = spot_arr,
-            target_price  = target,
+            fig                = None,
+            ticker             = ticker,
+            strategy_name      = name,
+            legs               = self.legs,
+            summary            = summary,
+            strategy           = strategy,
+            spot_range         = spot_arr,
+            target_price       = target,
+            profit_at_target   = profit_at_target,
+            pct_move_to_target = pct_move,
         )
 
         out_bytes = pdf_bytes if pdf_bytes is not None else tex_src.encode()
@@ -853,7 +1033,7 @@ class OptionsTUI(App[None]):
     @work(thread=True)
     def _fetch_expiries(self, ticker: str) -> None:
         try:
-            from market_data import get_spot_price, get_available_expiries
+            from core.market_data import get_spot_price, get_available_expiries
             spot     = get_spot_price(ticker)
             expiries = get_available_expiries(ticker)
             self._live_spot     = spot
@@ -890,7 +1070,7 @@ class OptionsTUI(App[None]):
     @work(thread=True)
     def _fetch_chain(self, ticker: str, expiry: str) -> None:
         try:
-            from market_data import get_options_chain
+            from core.market_data import get_options_chain
             calls, puts = get_options_chain(ticker, expiry)
             self._live_calls = calls
             self._live_puts  = puts
@@ -1020,15 +1200,19 @@ class OptionsTUI(App[None]):
         t.append(f"  ·  {c.get('ticker') or '—'}\n\n", style=C_AMBER)
         t.append("  Saved:       ", style=C_DIM)
         t.append(f"{datetime.fromisoformat(c['date_saved']).strftime('%d %b %Y %H:%M')}\n", style=C_AMBER)
+        def _sfmt(v) -> str:
+            try:    return _fmt_money(float(v))
+            except: return str(v)
+
         t.append("  Net Premium: ", style=C_DIM)
-        t.append(f"{'CR' if net>=0 else 'DR'} {abs(net):.2f}\n",
+        t.append(f"{'CR' if net>=0 else 'DR'} ${abs(net):,.2f}\n",
                  style=C_GREEN if net >= 0 else C_RED)
         t.append("  Max Profit:  ", style=C_DIM)
-        t.append(f"{s.get('max_profit',0):.2f}\n",  style=C_GREEN)
+        t.append(f"{_sfmt(s.get('max_profit', 0))}\n", style=C_GREEN)
         t.append("  Max Loss:    ", style=C_DIM)
-        t.append(f"{s.get('max_loss',0):.2f}\n",    style=C_RED)
+        t.append(f"{_sfmt(s.get('max_loss', 0))}\n",   style=C_RED)
         t.append("  Breakevens:  ", style=C_DIM)
-        t.append(f"{',  '.join(f'{b:.2f}' for b in be) if be else '—'}\n", style=C_YELLOW)
+        t.append(f"{',  '.join(f'${b:,.2f}' for b in be) if be else '—'}\n", style=C_YELLOW)
         t.append("\n  Legs:\n", style=C_CYAN)
         for L in c.get("legs", []):
             t.append(

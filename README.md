@@ -1,55 +1,51 @@
-# optiondashboard
+# Options Terminal
 
-A Streamlit-based options trading dashboard for building, visualising, and analysing multi-leg option strategies.
+A Bloomberg-style terminal for options strategy analysis. Fetch live chains, build multi-leg strategies, visualise payoff diagrams, and export PDF reports — all from the command line.
 
-## Features
-
-- Look up live or manual option chain data for any ticker
-- Select expiry dates and build multi-leg option strategies
-- Visualise payoff diagrams with interactive Plotly charts
-- Analyse risk/reward metrics (max profit, max loss, breakeven points)
-- Save and browse payoff visualisations locally
-- Dark trading-platform aesthetic
-
-## How to run
-
-### Option 1 — Makefile
-```bash
-make run
-```
-
-### Option 2 — Shell script
-```bash
-./run.sh
-```
-
-### Option 3 — Direct
-```bash
-streamlit run dashboard.py
-```
-
-## Setup
+## Quick start
 
 ```bash
-# Install dependencies
 pip install -r requirements.txt
-
-# Or using make
-make install
+python tui.py
 ```
 
-## Python version
+## Launching
 
-3.12.6 (managed via pyenv)
+| Command | What it does |
+|---------|-------------|
+| `python tui.py` | Run directly in current terminal |
+| `python tui.py --ticker AAPL` | Pre-populate ticker on launch |
+| `bash launch.sh [TICKER]` | Open a new Terminal.app window (macOS, amber theme) |
+| `python launch.py [TICKER]` | Open a new window on any OS |
 
-## File structure
+**First time on macOS** — install the terminal profile for the amber theme:
+1. Double-click `OptionsTerminal.terminal` in Finder
+2. Click OK to install
+3. `launch.sh` will use it automatically from then on
 
-| File | Purpose |
-|------|---------|
-| `dashboard.py` | Main UI and app entry point |
-| `core.py` | Core calculations and data structures |
-| `market_data.py` | Live market data via yfinance |
-| `strategies.py` | Pre-built strategy factory functions |
-| `visualization.py` | Payoff chart generation (matplotlib + plotly) |
-| `saved_charts/` | Locally saved payoff visualisations (JSON) |
-| `.streamlit/config.toml` | Streamlit theme configuration |
+## Project structure
+
+```
+tui.py                      ← entry point
+tui.tcss                    ← stylesheet
+launch.py                   ← multi-OS window spawner
+launch.sh                   ← macOS launcher
+OptionsTerminal.terminal    ← Terminal.app profile
+core/
+  engine.py                 ← options math
+  market_data.py            ← live data (yfinance)
+utils/
+  export_pdf.py             ← PDF export (ReportLab)
+data/
+  saved_charts/             ← saved JSON strategies (auto-created)
+  saved_pdfs/               ← exported PDFs (auto-created)
+requirements.txt
+```
+
+## Keyboard shortcuts
+
+| Key | Action |
+|-----|--------|
+| `Ctrl+N` | Open a new TUI window |
+| `Tab` | Navigate between tabs |
+| `Q` / `Ctrl+C` | Quit |

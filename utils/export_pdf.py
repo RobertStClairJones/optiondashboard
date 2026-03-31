@@ -21,7 +21,7 @@ import tempfile
 from datetime import date
 from pathlib import Path
 
-# Add parent dir so visualization/core are importable when called from utils/
+# Add project root to path so core package is importable from utils/
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 # ---------------------------------------------------------------------------
@@ -79,7 +79,7 @@ def _chart_png_matplotlib(strategy, spot_range, tmpdir: str,
         C_GRID    = "#f1f5f9"
         PALETTE   = ["#2563eb","#7c3aed","#ea580c","#059669","#db2777"]
 
-        fig, ax = plt.subplots(figsize=(12, 5.2))
+        fig, ax = plt.subplots(figsize=(10, 3.6))
         fig.patch.set_facecolor("white")
         ax.set_facecolor("white")
 
@@ -200,6 +200,8 @@ def _build_reportlab_pdf(
     legs: list[dict],
     summary: dict,
     chart_png: str | None,
+    profit_at_target: float | None = None,
+    pct_move_to_target: float | None = None,
 ) -> bytes:
     from reportlab.lib import colors
     from reportlab.lib.pagesizes import A4
@@ -211,38 +213,38 @@ def _build_reportlab_pdf(
     )
 
     W, H = A4  # 595 x 842 pt
-    margin = 2.5 * cm
+    margin = 2.0 * cm          # tighter margins to fit single page
     content_w = W - 2 * margin
 
     # ---- Styles ----
     def _style(name, **kw):
-        defaults = dict(fontName="Helvetica", fontSize=10, leading=14,
+        defaults = dict(fontName="Helvetica", fontSize=9, leading=12,
                         textColor=colors.HexColor("#1a1a2e"))
         defaults.update(kw)
         return ParagraphStyle(name, **defaults)
 
     S = {
-        "report_lbl":  _style("rl",  fontName="Helvetica", fontSize=8,
+        "report_lbl":  _style("rl",  fontName="Helvetica", fontSize=7,
                                textColor=colors.HexColor("#94a3b8"),
-                               spaceAfter=3),
-        "strat":       _style("strat", fontName="Helvetica-Bold", fontSize=15,
-                               textColor=colors.HexColor("#0f172a"), spaceAfter=4),
-        "date":        _style("date",  fontSize=9,
+                               spaceAfter=2),
+        "strat":       _style("strat", fontName="Helvetica-Bold", fontSize=13,
+                               textColor=colors.HexColor("#0f172a"), spaceAfter=3),
+        "date":        _style("date",  fontSize=8,
                                textColor=colors.HexColor("#64748b")),
-        "ticker_badge":_style("tb",  fontName="Helvetica-Bold", fontSize=26,
+        "ticker_badge":_style("tb",  fontName="Helvetica-Bold", fontSize=22,
                                alignment=1, textColor=colors.white,
-                               leading=30, spaceAfter=3),
-        "company_name":_style("cn",  fontName="Helvetica", fontSize=8,
+                               leading=26, spaceAfter=2),
+        "company_name":_style("cn",  fontName="Helvetica", fontSize=7,
                                alignment=1, textColor=colors.HexColor("#94a3b8"),
-                               leading=11),
-        "section":     _style("section", fontName="Helvetica-Bold", fontSize=12,
-                               spaceBefore=14, spaceAfter=5,
+                               leading=10),
+        "section":     _style("section", fontName="Helvetica-Bold", fontSize=10,
+                               spaceBefore=8, spaceAfter=3,
                                textColor=colors.HexColor("#0f172a")),
         "body":        _style("body"),
-        "metric_lbl":  _style("ml",  fontName="Helvetica-Bold", fontSize=10),
-        "metric_val":  _style("mv",  fontSize=10,
+        "metric_lbl":  _style("ml",  fontName="Helvetica-Bold", fontSize=9),
+        "metric_val":  _style("mv",  fontSize=9,
                                textColor=colors.HexColor("#1d4ed8")),
-        "disclaimer":  _style("disc", fontName="Helvetica-Oblique", fontSize=8,
+        "disclaimer":  _style("disc", fontName="Helvetica-Oblique", fontSize=7,
                                alignment=1, textColor=colors.HexColor("#94a3b8")),
     }
 
@@ -267,31 +269,28 @@ def _build_reportlab_pdf(
     if company_name:
         right_cell.append(Paragraph(company_name, S["company_name"]))
 
-    badge_w  = 4.2 * cm
-    left_w   = content_w - badge_w - 0.4 * cm
-    hdr_tbl  = Table(
-        [[left_cell, right_cell]],
-        colWidths=[left_w, badge_w],
-    )
+    badge_w = 3.6 * cm
+    left_w  = content_w - badge_w - 0.4 * cm
+    hdr_tbl = Table([[left_cell, right_cell]], colWidths=[left_w, badge_w])
     hdr_tbl.setStyle(TableStyle([
         ("VALIGN",        (0, 0), (-1, -1), "MIDDLE"),
         ("BACKGROUND",    (1, 0), (1,  0),  _NAVY),
-        ("ROUNDEDCORNERS",(1, 0), (1,  0),  [8, 8, 8, 8]),
-        ("TOPPADDING",    (1, 0), (1,  0),  16),
-        ("BOTTOMPADDING", (1, 0), (1,  0),  16),
-        ("LEFTPADDING",   (1, 0), (1,  0),  6),
-        ("RIGHTPADDING",  (1, 0), (1,  0),  6),
-        ("TOPPADDING",    (0, 0), (0,  0),  4),
-        ("BOTTOMPADDING", (0, 0), (0,  0),  4),
+        ("ROUNDEDCORNERS",(1, 0), (1,  0),  [6, 6, 6, 6]),
+        ("TOPPADDING",    (1, 0), (1,  0),  10),
+        ("BOTTOMPADDING", (1, 0), (1,  0),  10),
+        ("LEFTPADDING",   (1, 0), (1,  0),  5),
+        ("RIGHTPADDING",  (1, 0), (1,  0),  5),
+        ("TOPPADDING",    (0, 0), (0,  0),  2),
+        ("BOTTOMPADDING", (0, 0), (0,  0),  2),
         ("LEFTPADDING",   (0, 0), (0,  0),  0),
     ]))
     story.append(hdr_tbl)
-    story.append(Spacer(1, 10))
+    story.append(Spacer(1, 6))
     story.append(HRFlowable(width="100%", thickness=1,
                              color=colors.HexColor("#cbd5e1")))
-    story.append(Spacer(1, 14))
+    story.append(Spacer(1, 6))
 
-    # Strategy legs table
+    # ---- Strategy legs table ----
     story.append(Paragraph("Strategy Legs", S["section"]))
     hdr = [["Type", "Strike", "Expiry", "Position", "Premium"]]
     rows = []
@@ -303,46 +302,44 @@ def _build_reportlab_pdf(
             str(L.get("pos", "")).capitalize(),
             _usd(float(L.get("prem", 0.0))),
         ])
-    col_w = [2.8*cm, 2.4*cm, 3.2*cm, 2.6*cm, 2.6*cm]
+    col_w = [2.4*cm, 2.2*cm, 3.0*cm, 2.4*cm, 2.4*cm]
     tbl = Table(hdr + rows, colWidths=col_w, hAlign="LEFT")
     row_bg = [colors.HexColor("#f8fafc"), colors.white]
     tbl.setStyle(TableStyle([
         ("BACKGROUND",    (0, 0), (-1,  0),  colors.HexColor("#1e293b")),
         ("TEXTCOLOR",     (0, 0), (-1,  0),  colors.white),
         ("FONTNAME",      (0, 0), (-1,  0),  "Helvetica-Bold"),
-        ("FONTSIZE",      (0, 0), (-1, -1),  9),
+        ("FONTSIZE",      (0, 0), (-1, -1),  8),
         ("FONTNAME",      (0, 1), (-1, -1),  "Helvetica"),
         ("ROWBACKGROUNDS",(0, 1), (-1, -1),  row_bg),
         ("ALIGN",         (1, 0), (1, -1),   "RIGHT"),
         ("ALIGN",         (4, 0), (4, -1),   "RIGHT"),
-        ("TOPPADDING",    (0, 0), (-1, -1),  5),
-        ("BOTTOMPADDING", (0, 0), (-1, -1),  5),
-        ("LEFTPADDING",   (0, 0), (-1, -1),  7),
-        ("RIGHTPADDING",  (0, 0), (-1, -1),  7),
+        ("TOPPADDING",    (0, 0), (-1, -1),  3),
+        ("BOTTOMPADDING", (0, 0), (-1, -1),  3),
+        ("LEFTPADDING",   (0, 0), (-1, -1),  5),
+        ("RIGHTPADDING",  (0, 0), (-1, -1),  5),
         ("LINEBELOW",     (0, 0), (-1,  0),  1,   colors.HexColor("#1e293b")),
         ("LINEBELOW",     (0,-1), (-1, -1),  0.5, colors.HexColor("#e2e8f0")),
         ("GRID",          (0, 0), (-1, -1),  0.3, colors.HexColor("#e2e8f0")),
     ]))
     story.append(tbl)
-    story.append(Spacer(1, 14))
+    story.append(Spacer(1, 6))
 
-    # Payoff diagram
+    # ---- Payoff diagram ----
     story.append(Paragraph("Payoff Diagram", S["section"]))
     if chart_png:
-        img_h = content_w * (5.2 / 12)   # matches figsize=(12, 5.2) aspect ratio
+        img_h = content_w * (3.6 / 10)   # matches figsize=(10, 3.6) aspect ratio
         story.append(Image(chart_png, width=content_w, height=img_h))
     else:
         story.append(Paragraph("(Chart could not be rendered.)", S["body"]))
-    story.append(Spacer(1, 14))
+    story.append(Spacer(1, 6))
 
-    # Key metrics — two-column layout via a 4-col table
-    story.append(Paragraph("Key Metrics", S["section"]))
-
-    net    = summary.get("net_premium", 0.0)
-    max_p  = summary.get("max_profit", float("inf"))
-    max_l  = summary.get("max_loss",   float("-inf"))
-    be     = summary.get("breakeven_points", [])
-    spot   = summary.get("current_spot", None)
+    # ---- Key metrics + target analysis — single combined table ----
+    net   = summary.get("net_premium", 0.0)
+    max_p = summary.get("max_profit", float("inf"))
+    max_l = summary.get("max_loss",   float("-inf"))
+    be    = summary.get("breakeven_points", [])
+    spot  = summary.get("current_spot", None)
 
     net_str  = f"{'Credit' if net >= 0 else 'Debit'} {_usd(abs(net))}"
     be_str   = ", ".join(_usd(b) for b in be) if be else "None"
@@ -351,31 +348,56 @@ def _build_reportlab_pdf(
     def _lbl(t): return Paragraph(t, S["metric_lbl"])
     def _val(t): return Paragraph(t, S["metric_val"])
 
+    half   = content_w / 2
+    col4   = [2.8*cm, half - 2.8*cm, 2.8*cm, half - 2.8*cm]
+
+    metrics_section_label = (
+        "Key Metrics & Target Analysis"
+        if profit_at_target is not None
+        else "Key Metrics"
+    )
+    story.append(Paragraph(metrics_section_label, S["section"]))
+
     mx_data = [
         [_lbl("Max Profit"),    _val(_fmt_metric(max_p)),
          _lbl("Net Premium"),   _val(net_str)],
         [_lbl("Max Loss"),      _val(_fmt_metric(max_l)),
          _lbl("Current Spot"),  _val(spot_str)],
-        [_lbl("Breakeven Spot Price(s)"), _val(be_str), "", ""],
+        [_lbl("Breakeven(s)"),  _val(be_str), "", ""],
     ]
-    half = content_w / 2
-    mx_tbl = Table(mx_data,
-                   colWidths=[2.8*cm, half - 2.8*cm, 2.8*cm, half - 2.8*cm],
-                   hAlign="LEFT")
-    mx_tbl.setStyle(TableStyle([
-        ("VALIGN",        (0, 0), (-1, -1), "TOP"),
-        ("TOPPADDING",    (0, 0), (-1, -1), 5),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
-        ("LINEBELOW",     (0, 0), (-1, -2), 0.4, colors.HexColor("#f1f5f9")),
-        ("SPAN",          (1, 2), (3,  2)),
-    ]))
-    story.append(mx_tbl)
-    story.append(Spacer(1, 16))
 
-    # Footer disclaimer
+    # Append target rows inline when available
+    if profit_at_target is not None:
+        target_price_val = summary.get("target_price")
+        tp_str  = _usd(float(target_price_val)) if target_price_val is not None else "N/A"
+        pnl_str = _fmt_metric(profit_at_target)
+        if pct_move_to_target is not None:
+            sign     = "+" if pct_move_to_target >= 0 else ""
+            move_str = f"{sign}{pct_move_to_target:.2f}%"
+            mx_data.append([_lbl("Target Price"), _val(tp_str),
+                             _lbl("Move Required"), _val(move_str)])
+        else:
+            mx_data.append([_lbl("Target Price"), _val(tp_str), "", ""])
+        mx_data.append([_lbl("Profit at Target"), _val(pnl_str), "", ""])
+
+    mx_tbl = Table(mx_data, colWidths=col4, hAlign="LEFT")
+    span_rows = [i for i, row in enumerate(mx_data) if row[2] == ""]
+    style_cmds = [
+        ("VALIGN",        (0, 0), (-1, -1), "TOP"),
+        ("TOPPADDING",    (0, 0), (-1, -1), 4),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+        ("LINEBELOW",     (0, 0), (-1, -2), 0.4, colors.HexColor("#f1f5f9")),
+    ]
+    for r in span_rows:
+        style_cmds.append(("SPAN", (1, r), (3, r)))
+    mx_tbl.setStyle(TableStyle(style_cmds))
+    story.append(mx_tbl)
+    story.append(Spacer(1, 8))
+
+    # ---- Footer disclaimer ----
     story.append(HRFlowable(width="100%", thickness=0.5,
                              color=colors.HexColor("#e2e8f0")))
-    story.append(Spacer(1, 6))
+    story.append(Spacer(1, 4))
     story.append(Paragraph(_DISCLAIMER, S["disclaimer"]))
 
     doc.build(story)
@@ -471,12 +493,19 @@ def export_pdf(
     spot_range=None,
     company_name: str = "",
     target_price=None,
+    profit_at_target: float | None = None,
+    pct_move_to_target: float | None = None,
 ) -> tuple[bytes | None, str, str]:
     today = date.today()
     safe_name   = strategy_name.replace(" ", "_").replace("/", "-")
     safe_ticker = (ticker or "STRATEGY").upper()
     filename_base = f"{safe_ticker}_{safe_name}_{today.strftime('%Y-%m-%d')}"
     _current_spot = summary.get("current_spot") if summary else None
+
+    # Stash target_price in summary so _build_reportlab_pdf can display it
+    if summary is not None and target_price is not None:
+        summary = dict(summary)
+        summary["target_price"] = target_price
 
     with tempfile.TemporaryDirectory() as tmpdir:
         chart_png = _chart_png_matplotlib(
@@ -486,13 +515,15 @@ def export_pdf(
 
         try:
             pdf_bytes = _build_reportlab_pdf(
-                ticker        = ticker,
-                company_name  = company_name,
-                strategy_name = strategy_name,
-                report_date   = today,
-                legs          = legs,
-                summary       = summary,
-                chart_png     = chart_png,
+                ticker             = ticker,
+                company_name       = company_name,
+                strategy_name      = strategy_name,
+                report_date        = today,
+                legs               = legs,
+                summary            = summary,
+                chart_png          = chart_png,
+                profit_at_target   = profit_at_target,
+                pct_move_to_target = pct_move_to_target,
             )
             return pdf_bytes, "", filename_base
         except ImportError:

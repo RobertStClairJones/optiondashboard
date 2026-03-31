@@ -1,7 +1,9 @@
 {
   "permissions": {
     "allow": [
-      "Bash(python:*)"
+      "Bash(python:*)",
+      "Bash(cp saved_charts/* data/saved_charts/)",
+      "Bash(cp saved_pdfs/* data/saved_pdfs/)"
     ]
   }
 }
