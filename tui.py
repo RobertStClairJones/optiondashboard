@@ -207,6 +207,28 @@ def _analytical_max_profit_loss(legs: list[dict]) -> tuple[float | None, float |
     return None, None   # unrecognised — caller keeps numeric-scan result
 
 
+def _is_multi_directional(legs: list[dict]) -> bool:
+    """
+    Return True if the strategy can profit from the underlying moving in either
+    direction (straddle, strangle, butterfly, condor, iron condor).
+    """
+    opts = [L for L in legs if L.get("type") in ("call", "put")]
+    long_calls = [L for L in opts if L["type"] == "call" and L["pos"] == "long"]
+    long_puts  = [L for L in opts if L["type"] == "put"  and L["pos"] == "long"]
+    # Long straddle / strangle: long call + long put
+    if long_calls and long_puts:
+        return True
+    # Butterfly (3 options): long–short–long
+    if len(opts) == 3:
+        s = sorted(opts, key=lambda L: float(L["K"]))
+        if s[0]["pos"] == "long" and s[1]["pos"] == "short" and s[2]["pos"] == "long":
+            return True
+    # Condor / iron condor (4 options)
+    if len(opts) == 4:
+        return True
+    return False
+
+
 # ── Bloomberg colour palette ──────────────────────────────────────────────────
 C_AMBER  = "#FF8C00"
 C_GREEN  = "#00FF41"
@@ -406,6 +428,7 @@ class DashboardTab(Horizontal):
             yield Select([("long","long"),("short","short")],
                          value="long", id="sel-pos")
             yield Input(placeholder="Strike / Entry", value="100.00", id="inp-strike")
+            yield Static("", id="move-required", classes="move-required-info")
             yield Input(placeholder="Premium",        value="3.50",   id="inp-prem")
             yield Input(placeholder="Quantity",       value="1",      id="inp-qty")
             yield Input(placeholder="Expiry YYYY-MM-DD",
@@ -419,8 +442,10 @@ class DashboardTab(Horizontal):
                 yield Button("Clear All",   id="clear-btn")
                 yield Button("Remove Row",  id="btn-remove")
 
-            yield Label("TARGET PRICE (optional)", classes="section-label")
-            yield Input(placeholder="0.00", value="", id="inp-target")
+            with Vertical(id="target-section"):
+                yield Label("TARGET PRICE (optional)", classes="section-label")
+                yield Input(placeholder="0.00", value="", id="inp-target")
+                yield Static("", id="target-pnl-info")
 
         with Vertical(id="right-panel"):
             yield MetricsBar(id="metrics-bar")
@@ -508,10 +533,12 @@ class SavedTab(Horizontal):
             yield Label("SAVED CHARTS", classes="section-label")
             yield DataTable(id="saved-table", cursor_type="row")
             yield Button("Delete Selected", id="btn-del-saved")
+            yield Label("[P] Export PDF from selected", classes="section-label")
 
         with VerticalScroll(id="saved-detail"):
             yield Static("← Select a saved chart to view details",
                          id="saved-detail-text")
+            yield Static("", id="saved-pdf-status")
 
 
 _HELP_TEXT = """\
@@ -700,6 +727,9 @@ class OptionsTUI(App[None]):
         saved_tbl.add_columns("Strategy", "Ticker", "Date Saved")
         self._refresh_saved_table()
 
+        # Target price section is hidden until a multi-directional strategy is loaded
+        self.query_one("#target-section").display = False
+
         # Apply CLI arguments
         if self._cli_session_name:
             self.title = self._cli_session_name
@@ -750,6 +780,16 @@ class OptionsTUI(App[None]):
         self._update_cost_info(summary)
         self._update_target_info(strategy)
 
+        # Show/hide target-price section and update inline P&L display
+        multi = _is_multi_directional(self.legs)
+        try:
+            self.query_one("#target-section").display = multi
+        except Exception:
+            pass
+        self._update_move_required()
+        if multi:
+            self._update_target_pnl_info(strategy)
+
     def _update_cost_info(self, summary: dict) -> None:
         """Show net cost per contract (and budget) in the Live Data panel."""
         net    = summary.get("net_premium", 0.0)
@@ -781,6 +821,65 @@ class OptionsTUI(App[None]):
         for wid in ("#target-info", "#live-target-info"):
             try: self.query_one(wid, Static).update(t)
             except Exception: pass
+
+    def _update_move_required(self) -> None:
+        """Show distance from current spot to the strike entered in the Dashboard."""
+        try:
+            wid = self.query_one("#move-required", Static)
+        except Exception:
+            return
+        try:
+            strike_str = self.query_one("#inp-strike", Input).value.strip()
+            if not strike_str:
+                wid.update("")
+                return
+            strike = float(strike_str)
+            spot   = self._live_spot
+            if spot is None or spot <= 0:
+                wid.update("")
+                return
+            dist      = strike - spot
+            pct       = (dist / spot) * 100
+            sign      = "+" if dist >= 0 else ""
+            direction = "UP" if dist >= 0 else "DOWN"
+            t = RichText()
+            t.append(
+                f"  Move required: {sign}${dist:,.2f} ({sign}{pct:.2f}% {direction})",
+                style=C_CYAN if dist >= 0 else C_RED,
+            )
+            wid.update(t)
+        except (ValueError, Exception):
+            try:
+                wid.update("")
+            except Exception:
+                pass
+
+    def _update_target_pnl_info(self, strategy: Strategy) -> None:
+        """For multi-directional strategies, show P&L at the target price below the input."""
+        try:
+            info = self.query_one("#target-pnl-info", Static)
+        except Exception:
+            return
+        target_str = self.query_one("#inp-target", Input).value.strip()
+        if not target_str:
+            info.update("")
+            return
+        try:
+            target = float(target_str)
+        except ValueError:
+            info.update("")
+            return
+        pnl  = strategy.realized_payoff(target)
+        sign = "+" if pnl >= 0 else ""
+        pnl_str   = f"{sign}{_fmt_money(pnl)}"
+        pnl_style = C_GREEN if pnl >= 0 else C_RED
+        t = RichText()
+        t.append(f"  If UP to ${target:,.2f}: P&L = ", style=C_DIM)
+        t.append(pnl_str, style=pnl_style)
+        t.append("\n")
+        t.append(f"  If DOWN to ${target:,.2f}: P&L = ", style=C_DIM)
+        t.append(pnl_str, style=pnl_style)
+        info.update(t)
 
     # ── Dashboard button handlers ─────────────────────────────────────────────
     @on(Button.Pressed, "#btn-load-preset")
@@ -1051,6 +1150,7 @@ class OptionsTUI(App[None]):
                     self._set_live_status(f"Fetched {len(expiries)} expiries.")
                 else:
                     self._set_live_status(f"No expiries found for {ticker}.")
+                self._update_move_required()
             self.app.call_from_thread(_update)
         except Exception as exc:
             self.app.call_from_thread(self._set_live_status, f"Error: {exc}")
@@ -1129,6 +1229,25 @@ class OptionsTUI(App[None]):
             self.budget = float(event.value) if event.value.strip() else None
         except ValueError:
             self.budget = None
+
+    @on(Input.Changed, "#inp-strike")
+    def handle_strike_changed(self, _event: Input.Changed) -> None:
+        self._update_move_required()
+
+    @on(Input.Changed, "#inp-target")
+    def handle_target_changed(self, event: Input.Changed) -> None:
+        try:
+            self.target_price = float(event.value) if event.value.strip() else None
+        except ValueError:
+            self.target_price = None
+        if self.legs and _is_multi_directional(self.legs):
+            try:
+                name     = self.query_one("#inp-name", Input).value.strip() or "Strategy"
+                strategy = _build_strategy(name, self.legs)
+                self._update_target_pnl_info(strategy)
+                self._update_target_info(strategy)
+            except Exception:
+                pass
 
     @on(Select.Changed, "#live-opt-type")
     def handle_chain_type(self, event: Select.Changed) -> None:
@@ -1232,6 +1351,76 @@ class OptionsTUI(App[None]):
             self._refresh_saved_table()
             self.query_one("#saved-detail-text", Static).update(
                 RichText(" Deleted.", style=C_RED))
+
+    def on_key(self, event) -> None:
+        """Export PDF when P is pressed on the SAVED tab."""
+        if event.key != "p":
+            return
+        try:
+            active = self.query_one("#tabs", TabbedContent).active
+        except Exception:
+            return
+        if active != "tab-saved":
+            return
+        tbl: DataTable = self.query_one("#saved-table")
+        idx = tbl.cursor_row
+        if not (0 <= idx < len(self._saved_cache)):
+            self.query_one("#saved-pdf-status", Static).update(
+                RichText(" Select a row first.", style=C_RED))
+            return
+        self.query_one("#saved-pdf-status", Static).update(
+            RichText(" Generating PDF…", style=C_YELLOW))
+        self._do_export_saved_pdf(idx)
+
+    @work(thread=True)
+    def _do_export_saved_pdf(self, idx: int) -> None:
+        c    = self._saved_cache[idx]
+        legs = c.get("legs", [])
+        if not legs:
+            self.app.call_from_thread(
+                self.query_one("#saved-pdf-status", Static).update,
+                RichText(" No legs in saved strategy.", style=C_RED),
+            )
+            return
+        name   = c.get("strategy_name", "Strategy")
+        ticker = c.get("ticker") or name
+
+        strategy = _build_strategy(name, legs)
+        spot_arr = strategy._auto_spot_range()
+        summary  = strategy.summary(spot_arr)
+
+        ana_p, ana_l = _analytical_max_profit_loss(legs)
+        if ana_p is not None:
+            summary["max_profit"] = ana_p
+        if ana_l is not None:
+            summary["max_loss"] = ana_l
+
+        pdf_bytes, tex_src, fname_base = export_pdf(
+            fig                = None,
+            ticker             = ticker,
+            strategy_name      = name,
+            legs               = legs,
+            summary            = summary,
+            strategy           = strategy,
+            spot_range         = spot_arr,
+            target_price       = None,
+            profit_at_target   = None,
+            pct_move_to_target = None,
+        )
+
+        out_bytes = pdf_bytes if pdf_bytes is not None else tex_src.encode()
+        out_ext   = ".pdf"    if pdf_bytes is not None else ".tex"
+        out_fname = f"{fname_base}{out_ext}"
+        dl_path   = Path.home() / "Downloads" / out_fname
+        dl_path.write_bytes(out_bytes)
+        (SAVED_PDFS_DIR / out_fname).write_bytes(out_bytes)
+
+        full_path = str(dl_path)
+        label     = "PDF" if pdf_bytes else ".tex"
+        self.app.call_from_thread(
+            self.query_one("#saved-pdf-status", Static).update,
+            RichText(f"  {label} → {full_path}", style=C_GREEN),
+        )
 
     # ── Keybinding actions ──────────────────────────────────────────────────
     def action_refresh_chart(self) -> None:
