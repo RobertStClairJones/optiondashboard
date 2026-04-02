@@ -1,7 +1,26 @@
+# Python
 __pycache__/
+**/__pycache__/
 *.pyc
-.DS_Store
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+env/
+
+# Environment / secrets
 .env
+*.env.local
+
+# macOS
+.DS_Store
+**/.DS_Store
+
+# Claude Code local settings (private)
+.claude/
 
 # Generated output — not tracked
 data/saved_charts/
