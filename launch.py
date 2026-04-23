@@ -65,6 +65,7 @@ def _spawn_macos(ticker: str, session_name: str) -> None:
     if "true" in iterm_running.stdout.lower():
         script = f'''\
 tell application "iTerm2"
+    activate
     set newWindow to (create window with default profile)
     tell current session of newWindow
         write text "{cd_and_run.replace('"', '\\"')}"

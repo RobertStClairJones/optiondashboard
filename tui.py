@@ -266,11 +266,13 @@ def _build_strategy(name: str, legs: list[dict]) -> Strategy:
     return s
 
 
-def _render_chart(strategy: Strategy, width: int, height: int) -> RichText:
+def _render_chart(strategy: Strategy, width: int, height: int,
+                  hover_x: float | None = None) -> RichText:
     """
     Render ASCII payoff diagram.
     Calls strategy._auto_spot_range() and strategy.payoff_at_expiry() from core.py.
     Uses plotext for rendering; falls back to a plain-text note on error.
+    Optional hover_x draws a cyan vertical crosshair at that spot price.
     """
     try:
         import plotext as plt
@@ -303,6 +305,9 @@ def _render_chart(strategy: Strategy, width: int, height: int) -> RichText:
         plt.hline(0, color=239)
         for be in strategy.breakeven_points(spot_range):
             plt.vline(be, color="yellow")
+
+        if hover_x is not None:
+            plt.vline(hover_x, color="cyan")
 
         plt.xlabel("Spot Price at Expiry")
         plt.ylabel("P/L")
@@ -388,19 +393,136 @@ class MetricsBar(Horizontal):
                   "  ".join(f"${b:,.2f}" for b in be) if be else "—",
                   C_YELLOW))
 
+    def reset(self) -> None:
+        """Blank all metric cells to dashes (no active strategy)."""
+        def _cell(title: str) -> RichText:
+            t = RichText()
+            t.append(f" {title}\n", style=f"{C_DIM} bold")
+            t.append(" —",          style=f"{C_DIM} bold")
+            return t
+        for wid, title in (("#m-net",    "NET PREMIUM"),
+                           ("#m-profit", "MAX PROFIT"),
+                           ("#m-loss",   "MAX LOSS"),
+                           ("#m-be",     "BREAKEVEN(S)")):
+            try: self.query_one(wid).update(_cell(title))
+            except Exception: pass
+
 
 class ChartWidget(Static):
-    """ASCII payoff diagram, rendered via plotext."""
+    """ASCII payoff diagram, rendered via plotext.
+
+    Supports a mouse-hover crosshair: stores the most recent strategy and
+    redraws with a vertical cyan line at the hovered spot price. Also
+    updates a paired tooltip widget (set via `tooltip_id`) showing
+    Spot / P/L / % Move values.
+    """
 
     DEFAULT_CSS = "ChartWidget { height: 1fr; background: #000000; }"
 
+    # Plotext leaves roughly these many cells for axis labels — approximate.
+    _PAD_LEFT  = 7
+    _PAD_RIGHT = 2
+    _PAD_TOP   = 2
+    _PAD_BOT   = 3
+
+    def __init__(self, *args, tooltip_id: str | None = None, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._strategy: Strategy | None = None
+        self._spot_min: float = 0.0
+        self._spot_max: float = 0.0
+        self._current_spot: float | None = None
+        self._tooltip_id = tooltip_id
+        self._last_hover_x: float | None = None
+
     def on_mount(self) -> None:
         self.update(RichText(" No strategy — add legs on the left.", style=C_AMBER))
+        self._reset_tooltip()
 
-    def refresh_chart(self, strategy: Strategy) -> None:
+    def _reset_tooltip(self) -> None:
+        """Persistent placeholder (dashes) in the info bar when no hover is active."""
+        if not self._tooltip_id:
+            return
+        tt = RichText()
+        tt.append("  Hover over chart   ", style=f"{C_DIM} bold")
+        tt.append("Spot: ", style=C_DIM);   tt.append("—",     style=C_CYAN)
+        tt.append("   P/L: ", style=C_DIM); tt.append("—",     style=C_AMBER)
+        tt.append("   Move: ", style=C_DIM);tt.append("—",     style=C_AMBER)
+        try:
+            self.app.query_one(self._tooltip_id, Static).update(tt)
+        except Exception:
+            pass
+
+    def refresh_chart(self, strategy: Strategy,
+                      current_spot: float | None = None) -> None:
+        self._strategy = strategy
+        arr = strategy._auto_spot_range()
+        self._spot_min = float(arr[0])
+        self._spot_max = float(arr[-1])
+        self._current_spot = current_spot
+        self._last_hover_x = None
         w = max(self.size.width  or 80, 20)
         h = max(self.size.height or 24,  8)
         self.update(_render_chart(strategy, w, h))
+        self._reset_tooltip()
+
+    def _mouse_x_to_spot(self, mx: int) -> float | None:
+        w = max(self.size.width or 80, 20)
+        chart_w = max(w - self._PAD_LEFT - self._PAD_RIGHT, 1)
+        x_in = mx - self._PAD_LEFT
+        if x_in < 0 or x_in > chart_w:
+            return None
+        if self._spot_max <= self._spot_min:
+            return None
+        frac = x_in / chart_w
+        return self._spot_min + frac * (self._spot_max - self._spot_min)
+
+    def on_mouse_move(self, event) -> None:
+        if self._strategy is None:
+            return
+        spot = self._mouse_x_to_spot(event.x)
+        if spot is None:
+            return
+        # Skip redraw if the mapped spot didn't change meaningfully.
+        if (self._last_hover_x is not None
+                and abs(spot - self._last_hover_x) < (self._spot_max - self._spot_min) / 400):
+            return
+        self._last_hover_x = spot
+        try:
+            pnl = float(self._strategy.realized_payoff(spot))
+        except Exception:
+            return
+
+        tt = RichText()
+        tt.append("  Hover  ", style=f"{C_DIM} bold")
+        tt.append(f"Spot: ", style=C_DIM)
+        tt.append(f"${spot:,.2f}", style=C_CYAN)
+        tt.append("   P/L: ", style=C_DIM)
+        tt.append(f"${pnl:,.2f}", style=C_GREEN if pnl >= 0 else C_RED)
+        if self._current_spot and self._current_spot > 0:
+            pct = ((spot - self._current_spot) / self._current_spot) * 100
+            sign = "+" if pct >= 0 else ""
+            tt.append("   Move: ", style=C_DIM)
+            tt.append(f"{sign}{pct:.2f}%", style=C_AMBER)
+        if self._tooltip_id:
+            try:
+                self.app.query_one(self._tooltip_id, Static).update(tt)
+            except Exception:
+                pass
+
+        # Redraw chart with crosshair at hovered spot.
+        w = max(self.size.width  or 80, 20)
+        h = max(self.size.height or 24,  8)
+        self.update(_render_chart(self._strategy, w, h, hover_x=spot))
+
+    def on_leave(self, event=None) -> None:
+        """Clear crosshair and reset tooltip to placeholder state."""
+        if self._strategy is None:
+            return
+        self._last_hover_x = None
+        self._reset_tooltip()
+        w = max(self.size.width  or 80, 20)
+        h = max(self.size.height or 24,  8)
+        self.update(_render_chart(self._strategy, w, h))
 
 
 # ── Panel Widget subclasses (each has its own compose so context managers work)
@@ -412,6 +534,7 @@ class DashboardTab(Horizontal):
 
     def compose(self) -> ComposeResult:
         with VerticalScroll(id="left-panel"):
+            yield Button("⟲ RESET ALL", id="btn-reset-all", classes="reset-btn")
             yield Label("STRATEGY", classes="section-label")
             yield Input(placeholder="Strategy name…",
                         value="Custom Strategy", id="inp-name")
@@ -438,7 +561,7 @@ class DashboardTab(Horizontal):
 
             yield Label("LEGS", classes="section-label")
             yield DataTable(id="legs-table", cursor_type="row")
-            with Horizontal():
+            with Horizontal(id="dash-legs-actions"):
                 yield Button("Clear All",   id="clear-btn")
                 yield Button("Remove Row",  id="btn-remove")
 
@@ -451,7 +574,8 @@ class DashboardTab(Horizontal):
             yield MetricsBar(id="metrics-bar")
             yield Static("", id="target-info",  classes="target-info")
             yield Static("", id="status-msg")
-            yield ChartWidget(id="chart-widget")
+            yield Static("", id="chart-hover-info", classes="hover-info")
+            yield ChartWidget(id="chart-widget", tooltip_id="#chart-hover-info")
             with Horizontal(id="action-row"):
                 yield Button("Save Chart", id="save-btn")
                 yield Button("Export PDF", id="pdf-btn")
@@ -465,6 +589,7 @@ class LiveDataTab(Horizontal):
 
     def compose(self) -> ComposeResult:
         with VerticalScroll(id="live-form"):
+            yield Button("⟲ RESET ALL", id="live-reset-all", classes="reset-btn")
             yield Label("STRATEGY NAME", classes="section-label")
             yield Input(placeholder="Strategy name…",
                         value="Custom Strategy", id="live-inp-name")
@@ -502,7 +627,7 @@ class LiveDataTab(Horizontal):
             yield Rule()
             yield Label("STRATEGY LEGS", classes="section-label")
             yield DataTable(id="live-legs-table", cursor_type="row")
-            with Horizontal():
+            with Horizontal(id="live-legs-actions"):
                 yield Button("Clear All", id="live-clear-btn", classes="danger-btn")
                 yield Button("Remove Leg", id="live-remove-btn")
 
@@ -516,7 +641,8 @@ class LiveDataTab(Horizontal):
             yield MetricsBar(id="live-metrics-bar")
             yield Static("", id="live-target-info", classes="target-info")
             yield Static("", id="live-cost-info",   classes="cost-info")
-            yield ChartWidget(id="live-chart-widget")
+            yield Static("", id="live-chart-hover-info", classes="hover-info")
+            yield ChartWidget(id="live-chart-widget", tooltip_id="#live-chart-hover-info")
             with Horizontal(id="live-action-row"):
                 yield Button("Save", id="live-save-btn")
                 yield Button("Export PDF", id="live-pdf-btn")
@@ -533,12 +659,33 @@ class SavedTab(Horizontal):
             yield Label("SAVED CHARTS", classes="section-label")
             yield DataTable(id="saved-table", cursor_type="row")
             yield Button("Delete Selected", id="btn-del-saved")
-            yield Label("[P] Export PDF from selected", classes="section-label")
+            yield Button("Download PDF", id="btn-saved-pdf")
+            yield Label("(or press [P] on selected row)", classes="section-label")
 
-        with VerticalScroll(id="saved-detail"):
+        with Vertical(id="saved-detail"):
             yield Static("← Select a saved chart to view details",
                          id="saved-detail-text")
+            yield Static("", id="saved-chart-hover-info", classes="hover-info")
+            yield ChartWidget(id="saved-chart-widget",
+                              tooltip_id="#saved-chart-hover-info")
             yield Static("", id="saved-pdf-status")
+
+
+class BacktestingTab(Vertical):
+    """Placeholder for future backtesting features."""
+
+    DEFAULT_CSS = "BacktestingTab { height: 1fr; background: #000000; align: center middle; }"
+
+    def compose(self) -> ComposeResult:
+        yield Static(
+            RichText.from_markup(
+                "[#00E5FF bold]BACKTESTING[/]\n\n"
+                "[#FF8C00]Coming Soon[/]\n\n"
+                "[#664400]Historical payoff simulation, scenario analysis,\n"
+                "and strategy performance over custom date ranges.[/]"
+            ),
+            id="backtesting-placeholder",
+        )
 
 
 _HELP_TEXT = """\
@@ -708,6 +855,8 @@ class OptionsTUI(App[None]):
                 yield DashboardTab()
             with TabPane("SAVED", id="tab-saved"):
                 yield SavedTab()
+            with TabPane("BACKTESTING", id="tab-backtesting"):
+                yield BacktestingTab()
             with TabPane("? HELP", id="tab-help"):
                 yield HelpTab()
         yield Footer()
@@ -772,11 +921,11 @@ class OptionsTUI(App[None]):
 
         # Update Dashboard tab widgets
         self.query_one("#metrics-bar",     MetricsBar).update_metrics(summary)
-        self.query_one("#chart-widget",    ChartWidget).refresh_chart(strategy)
+        self.query_one("#chart-widget",    ChartWidget).refresh_chart(strategy, self._live_spot)
 
         # Update Live Data tab widgets (always in sync)
         self.query_one("#live-metrics-bar",  MetricsBar).update_metrics(summary)
-        self.query_one("#live-chart-widget", ChartWidget).refresh_chart(strategy)
+        self.query_one("#live-chart-widget", ChartWidget).refresh_chart(strategy, self._live_spot)
         self._update_cost_info(summary)
         self._update_target_info(strategy)
 
@@ -914,6 +1063,92 @@ class OptionsTUI(App[None]):
         self._refresh_legs_table()
         self._rebuild_and_render()
         self._set_status(f"Added {pos} {leg_type} K={strike:.2f}")
+
+    @on(Button.Pressed, "#btn-reset-all")
+    @on(Button.Pressed, "#live-reset-all")
+    def handle_reset_all(self) -> None:
+        self._reset_all()
+
+    def _reset_all(self) -> None:
+        """Wipe every input, select, chain, and piece of state back to defaults."""
+        self.legs = []
+        self._refresh_legs_table()
+
+        # Dashboard inputs
+        defaults_inputs = {
+            "#inp-name":   "Custom Strategy",
+            "#inp-ticker": "",
+            "#inp-strike": "100.00",
+            "#inp-prem":   "3.50",
+            "#inp-qty":    "1",
+            "#inp-expiry": (date.today() + timedelta(days=90)).strftime("%Y-%m-%d"),
+            "#inp-target": "",
+            # Live inputs
+            "#live-inp-name": "Custom Strategy",
+            "#live-ticker":   "",
+            "#live-target":   "",
+            "#live-budget":   "",
+            "#live-qty":      "1",
+        }
+        for sel, val in defaults_inputs.items():
+            try: self.query_one(sel, Input).value = val
+            except Exception: pass
+
+        # Selects with fixed option sets
+        fixed_selects = {
+            "#sel-preset":     "— none —",
+            "#sel-type":       "call",
+            "#sel-pos":        "long",
+            "#live-opt-type":  "call",
+            "#live-opt-pos":   "long",
+            "#live-price-src": "mid",
+        }
+        for sel, val in fixed_selects.items():
+            try: self.query_one(sel, Select).value = val
+            except Exception: pass
+
+        # Dynamic selects — clear options entirely
+        for sel_id in ("#sel-expiry", "#sel-strike"):
+            try: self.query_one(sel_id, Select).set_options([])
+            except Exception: pass
+
+        # Clear chain table
+        try: self.query_one("#chain-table", DataTable).clear()
+        except Exception: pass
+
+        # Reset state
+        self.target_price   = None
+        self.budget         = None
+        self._live_spot     = None
+        self._live_expiries = []
+        self._live_calls    = None
+        self._live_puts     = None
+        self._live_expiry   = ""
+
+        # Clear status / info widgets
+        for wid in ("#live-spot-label", "#live-strike-label", "#live-status",
+                    "#live-cost-info",  "#target-info", "#live-target-info",
+                    "#move-required",   "#target-pnl-info",
+                    "#action-status",   "#live-action-status",
+                    "#status-msg", "#chart-hover-info", "#live-chart-hover-info",
+                    "#saved-chart-hover-info"):
+            try: self.query_one(wid, Static).update(RichText(""))
+            except Exception: pass
+
+        # Reset metric bars back to dashes
+        for mb_id in ("#metrics-bar", "#live-metrics-bar"):
+            try: self.query_one(mb_id, MetricsBar).reset()
+            except Exception: pass
+
+        # Reset charts and hide the target-price section
+        for cw in self.query(ChartWidget):
+            cw._strategy = None
+            cw.update(RichText(" No legs — add at least one leg.", style=C_AMBER))
+            cw._reset_tooltip()
+        try: self.query_one("#target-section").display = False
+        except Exception: pass
+
+        self._set_status("Reset complete — clean slate.")
 
     @on(Button.Pressed, "#clear-btn")
     def handle_clear(self) -> None:
@@ -1340,17 +1575,71 @@ class OptionsTUI(App[None]):
                 style=C_AMBER)
         self.query_one("#saved-detail-text", Static).update(t)
 
+        # Render the payoff chart for this saved strategy (with hover tooltip)
+        legs = c.get("legs", [])
+        if legs:
+            try:
+                strategy = _build_strategy(c.get("strategy_name", "Strategy"), legs)
+                saved_spot = c.get("summary", {}).get("current_spot")
+                self.query_one("#saved-chart-widget", ChartWidget).refresh_chart(
+                    strategy, saved_spot)
+            except Exception as exc:
+                self.query_one("#saved-chart-widget", ChartWidget).update(
+                    RichText(f" [chart error: {exc}]", style=C_RED))
+        else:
+            self.query_one("#saved-chart-widget", ChartWidget).update(
+                RichText(" No legs in this saved strategy.", style=C_AMBER))
+
+    @on(Button.Pressed, "#btn-saved-pdf")
+    def handle_saved_pdf_button(self) -> None:
+        tbl: DataTable = self.query_one("#saved-table")
+        idx = tbl.cursor_row
+        if not (0 <= idx < len(self._saved_cache)):
+            self.query_one("#saved-pdf-status", Static).update(
+                RichText(" Select a row first.", style=C_RED))
+            return
+        self.query_one("#saved-pdf-status", Static).update(
+            RichText(" Generating PDF…", style=C_YELLOW))
+        self._do_export_saved_pdf(idx)
+
     @on(Button.Pressed, "#btn-del-saved")
     def handle_delete_saved(self) -> None:
         tbl: DataTable = self.query_one("#saved-table")
         idx = tbl.cursor_row
         if 0 <= idx < len(self._saved_cache):
-            path = Path(self._saved_cache[idx]["_path"])
-            if path.exists():
-                path.unlink()
+            entry    = self._saved_cache[idx]
+            json_path = Path(entry["_path"])
+            if json_path.exists():
+                json_path.unlink()
+
+            # Also delete any matching PDFs/tex in the project folder.
+            # Filename pattern from utils.export_pdf: {TICKER}_{safe_name}_{date}.{pdf|tex}
+            ticker    = (entry.get("ticker") or "STRATEGY").upper()
+            safe_name = (entry.get("strategy_name") or "Strategy").replace(" ", "_").replace("/", "-")
+            pattern   = f"{ticker}_{safe_name}_*"
+            pdfs_removed = 0
+            for ext in ("pdf", "tex"):
+                for fp in SAVED_PDFS_DIR.glob(f"{pattern}.{ext}"):
+                    try:
+                        fp.unlink()
+                        pdfs_removed += 1
+                    except Exception:
+                        pass
+
             self._refresh_saved_table()
+            msg = " Deleted."
+            if pdfs_removed:
+                msg += f"  (also removed {pdfs_removed} PDF{'s' if pdfs_removed != 1 else ''} from saved_pdfs/)"
             self.query_one("#saved-detail-text", Static).update(
-                RichText(" Deleted.", style=C_RED))
+                RichText(msg, style=C_RED))
+            # Clear the chart and hover info so the detail pane isn't stale.
+            try:
+                self.query_one("#saved-chart-widget", ChartWidget).update(
+                    RichText(" Deleted.", style=C_RED))
+                self.query_one("#saved-chart-hover-info", Static).update(RichText(""))
+                self.query_one("#saved-pdf-status", Static).update(RichText(""))
+            except Exception:
+                pass
 
     def on_key(self, event) -> None:
         """Export PDF when P is pressed on the SAVED tab."""

@@ -33,6 +33,28 @@ TabbedContent {
 TabbedContent > TabPane {
     padding: 0;
     background: #000000;
+    height: 1fr;
+    overflow: hidden;
+}
+
+/* Scroll containers need direct children to have bounded heights so
+   total content height is deterministic and the scrollbar activates. */
+#left-panel > Horizontal,
+#live-form  > Horizontal {
+    height: auto;
+    min-height: 3;
+    width: 100%;
+    margin-top: 1;
+}
+
+#dash-legs-actions,
+#live-legs-actions {
+    height: 3;
+}
+
+/* Nested Vertical inside the scroll must size to its content, not fill. */
+#target-section {
+    height: auto;
 }
 
 Tabs {
@@ -72,7 +94,8 @@ Tab.-active {
     background: #000000;
     overflow-y: auto;
     scrollbar-color: #FF4500 #0d0500;
-    scrollbar-size: 1 1;
+    scrollbar-size: 2 1;
+    padding-bottom: 1;
 }
 
 #right-panel {
@@ -94,8 +117,8 @@ Input {
     background: #0a0400;
     border: solid #4a2800;
     color: #FF8C00;
-    height: 4;
-    padding: 1 2;
+    height: 3;
+    padding: 0 2;
 }
 
 Input:focus {
@@ -323,7 +346,24 @@ DataTable > .datatable--even-row {
     border-left: solid #2a1500;
     height: 1fr;
     padding: 1;
+}
+
+#saved-detail-text {
+    height: auto;
+    max-height: 20;
     overflow-y: auto;
+}
+
+#saved-chart-widget {
+    height: 1fr;
+    min-height: 12;
+    margin-top: 1;
+    border: solid #2a1500;
+}
+
+#saved-pdf-status {
+    height: 1;
+    margin-top: 1;
 }
 
 /* ── Live data panel ── */
@@ -332,7 +372,10 @@ DataTable > .datatable--even-row {
     height: 1fr;
     border-right: solid #2a1500;
     padding: 1;
+    padding-bottom: 2;
     overflow-y: auto;
+    scrollbar-color: #FF4500 #0d0500;
+    scrollbar-size: 2 1;
 }
 
 #live-right-panel {
@@ -396,6 +439,31 @@ Button#live-remove-btn {
 
 Button#live-remove-btn:hover {
     background: #FF8C00;
+    color: #000000;
+}
+
+/* ── Chart hover info bar (persistent; shows dashes when idle) ── */
+.hover-info {
+    height: 1;
+    padding: 0 1;
+    background: #0d0500;
+    color: #00E5FF;
+    text-style: bold;
+}
+
+/* ── Reset-all button (danger, prominent) ── */
+.reset-btn {
+    background: #1a0500;
+    border: solid #FF3333;
+    color: #FF3333;
+    height: 3;
+    width: 100%;
+    margin-bottom: 1;
+    text-style: bold;
+}
+
+.reset-btn:hover {
+    background: #FF3333;
     color: #000000;
 }
 
