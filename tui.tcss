@@ -60,7 +60,7 @@ TabbedContent > TabPane {
 Tabs {
     background: #0d0500;
     border-bottom: solid #FF4500;
-    height: 2;
+    height: 4;
 }
 
 /* Hide the built-in sliding underline — it bleeds into content */
@@ -68,10 +68,14 @@ Tabs Underline {
     display: none;
 }
 
+/* ~20% larger tab labels — extra horizontal padding + taller cells.
+   Textual TUI cannot scale glyphs directly, so we scale the visual chrome. */
 Tab {
     background: #0d0500;
     color: #886040;
-    padding: 0 2;
+    padding: 1 3;
+    height: 3;
+    text-style: bold;
 }
 
 Tab:hover {
@@ -79,7 +83,7 @@ Tab:hover {
     color: #FF8C00;
 }
 
-/* Active tab: amber fill + black text — no border line needed */
+/* Active tab: amber fill + black text */
 Tab.-active {
     background: #FF8C00;
     color: #000000;
@@ -497,4 +501,73 @@ Rule {
     color: #664400;
     background: #050200;
     padding: 0 1;
+}
+
+/* ── Toggle buttons (CALL/PUT, LONG/SHORT) ── */
+.toggle-row {
+    height: 3;
+    width: 100%;
+    margin-bottom: 1;
+}
+
+.toggle-btn {
+    width: 1fr;
+    height: 3;
+    background: #0d0500;
+    border: solid #4a2800;
+    color: #886040;
+    text-style: bold;
+}
+
+.toggle-btn:hover {
+    background: #1a0a00;
+    color: #FF8C00;
+}
+
+.toggle-btn.-active {
+    background: #FF8C00;
+    border: solid #FFB347;
+    color: #000000;
+    text-style: bold;
+}
+
+/* ── Collapsible left-panel sections ── */
+Collapsible {
+    background: #000000;
+    border: solid #2a1500;
+    margin-bottom: 1;
+}
+
+Collapsible > CollapsibleTitle {
+    background: #1a0800;
+    color: #00E5FF;
+    text-style: bold;
+    padding: 0 1;
+    height: 2;
+}
+
+Collapsible > Contents {
+    background: #000000;
+    padding: 0 1;
+}
+
+/* ── Option-chain legend hint line ── */
+.chain-legend {
+    height: 1;
+    color: #00E5FF;
+    background: #0d0500;
+    padding: 0 1;
+    text-style: bold;
+}
+
+/* ── Toast notification (bottom-right) ── */
+ToastContainer {
+    dock: bottom;
+    width: 100%;
+    height: 1;
+    background: transparent;
+    color: #00FF41;
+    padding: 0 2;
+    content-align: right middle;
+    text-style: bold;
 }

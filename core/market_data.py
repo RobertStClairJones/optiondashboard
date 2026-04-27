@@ -26,11 +26,34 @@ display_chain(ticker, expiry, option_type, atm_range)
 
 from __future__ import annotations
 
+import math
 from datetime import datetime, date
 
 import pandas as pd
 
 from core import Option
+
+
+# Black-Scholes delta (no dividends, configurable risk-free rate).
+_RISK_FREE_RATE = 0.04
+
+
+def _norm_cdf(x: float) -> float:
+    return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
+
+
+def _bs_delta(spot: float, strike: float, t_years: float,
+              iv: float, opt_type: str) -> float:
+    """Return Black-Scholes delta. NaN-safe; returns float('nan') if inputs degenerate."""
+    if (spot is None or strike is None or iv is None
+            or spot <= 0 or strike <= 0 or iv <= 0 or t_years <= 0
+            or iv != iv or spot != spot or strike != strike):
+        return float("nan")
+    sigma_sqrt_t = iv * math.sqrt(t_years)
+    d1 = (math.log(spot / strike) + (_RISK_FREE_RATE + 0.5 * iv * iv) * t_years) / sigma_sqrt_t
+    if opt_type == "call":
+        return _norm_cdf(d1)
+    return _norm_cdf(d1) - 1.0
 
 
 # ---------------------------------------------------------------------------
@@ -127,6 +150,26 @@ def get_options_chain(
 
     calls = _add_mid(chain.calls[[c for c in cols if c in chain.calls.columns]])
     puts  = _add_mid(chain.puts [[c for c in cols if c in chain.puts.columns]])
+
+    # Best-effort Black-Scholes delta column. Shown as "Δ" in the TUI chain.
+    try:
+        spot = get_spot_price(ticker)
+        exp_dt = datetime.strptime(expiry, "%Y-%m-%d").date()
+        t_years = max((exp_dt - date.today()).days / 365.0, 1.0 / 365.0)
+        if "impliedVolatility" in calls.columns:
+            calls["delta"] = calls.apply(
+                lambda r: _bs_delta(spot, float(r["strike"]), t_years,
+                                    float(r["impliedVolatility"]), "call"),
+                axis=1,
+            )
+        if "impliedVolatility" in puts.columns:
+            puts["delta"] = puts.apply(
+                lambda r: _bs_delta(spot, float(r["strike"]), t_years,
+                                    float(r["impliedVolatility"]), "put"),
+                axis=1,
+            )
+    except Exception:
+        pass
 
     return calls, puts
 

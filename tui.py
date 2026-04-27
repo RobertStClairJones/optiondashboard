@@ -28,8 +28,9 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.reactive import reactive
+from textual.screen import ModalScreen
 from textual.widgets import (
-    Button, DataTable, Footer, Header, Input,
+    Button, Collapsible, DataTable, Footer, Header, Input,
     Label, Rule, Select, Static, TabbedContent, TabPane,
 )
 from textual import on, work
@@ -267,12 +268,13 @@ def _build_strategy(name: str, legs: list[dict]) -> Strategy:
 
 
 def _render_chart(strategy: Strategy, width: int, height: int,
-                  hover_x: float | None = None) -> RichText:
+                  hover_x: float | None = None,
+                  current_spot: float | None = None) -> RichText:
     """
     Render ASCII payoff diagram.
-    Calls strategy._auto_spot_range() and strategy.payoff_at_expiry() from core.py.
     Uses plotext for rendering; falls back to a plain-text note on error.
     Optional hover_x draws a cyan vertical crosshair at that spot price.
+    Marks each leg, the current spot, and labels each breakeven price.
     """
     try:
         import plotext as plt
@@ -286,7 +288,8 @@ def _render_chart(strategy: Strategy, width: int, height: int,
         plt.axes_color("black")
         plt.ticks_color("orange")
 
-        spot_range = strategy._auto_spot_range(n=min(chart_w * 3, 600))
+        # Higher-density sample = visually smoother polyline.
+        spot_range = strategy._auto_spot_range(n=min(chart_w * 6, 1200))
         total_pnl  = strategy.payoff_at_expiry(spot_range)
         spots      = spot_range.tolist()
         pnls       = total_pnl.tolist()
@@ -294,20 +297,44 @@ def _render_chart(strategy: Strategy, width: int, height: int,
         above = [v if v >= 0 else float("nan") for v in pnls]
         below = [v if v <  0 else float("nan") for v in pnls]
 
-        # Draw order matters in plotext: last plot wins per pixel.
-        # Orange baseline first, then green profit on top, red loss on top last.
-        plt.plot(spots, pnls,  color="orange", label="P&L")
-        if any(v == v for v in above):   # nan != nan
-            plt.plot(spots, above, color="green", label="Profit")
+        # Per-leg payoff curves (thin amber dashes underneath the total).
+        if len(strategy.legs) > 1:
+            for leg in strategy.legs:
+                try:
+                    leg_pnl = leg.payoff_at_expiry(spot_range).tolist()
+                    plt.plot(spots, leg_pnl, color="orange+",
+                             marker="braille", label=getattr(leg, "label", "leg"))
+                except Exception:
+                    pass
+
+        # Total P&L: the prominent line. Braille marker = highest density.
+        plt.plot(spots, pnls, color="orange", marker="braille", label="P&L")
+        if any(v == v for v in above):
+            plt.plot(spots, above, color="green", marker="braille", label="Profit")
         if any(v == v for v in below):
-            plt.plot(spots, below, color="red",   label="Loss")
+            plt.plot(spots, below, color="red", marker="braille", label="Loss")
 
         plt.hline(0, color=239)
         for be in strategy.breakeven_points(spot_range):
             plt.vline(be, color="yellow")
+            try:
+                plt.text(f"BE ${be:.2f}", x=be, y=0,
+                         color="yellow", background="black", alignment="center")
+            except Exception:
+                pass
+
+        # Current spot — distinct cyan/white marker line.
+        if current_spot is not None and current_spot > 0:
+            plt.vline(current_spot, color="cyan")
+            try:
+                plt.text(f"Spot ${current_spot:.2f}",
+                         x=current_spot, y=max(pnls),
+                         color="cyan", background="black", alignment="center")
+            except Exception:
+                pass
 
         if hover_x is not None:
-            plt.vline(hover_x, color="cyan")
+            plt.vline(hover_x, color="cyan+")
 
         plt.xlabel("Spot Price at Expiry")
         plt.ylabel("P/L")
@@ -462,7 +489,7 @@ class ChartWidget(Static):
         self._last_hover_x = None
         w = max(self.size.width  or 80, 20)
         h = max(self.size.height or 24,  8)
-        self.update(_render_chart(strategy, w, h))
+        self.update(_render_chart(strategy, w, h, current_spot=current_spot))
         self._reset_tooltip()
 
     def _mouse_x_to_spot(self, mx: int) -> float | None:
@@ -512,7 +539,8 @@ class ChartWidget(Static):
         # Redraw chart with crosshair at hovered spot.
         w = max(self.size.width  or 80, 20)
         h = max(self.size.height or 24,  8)
-        self.update(_render_chart(self._strategy, w, h, hover_x=spot))
+        self.update(_render_chart(self._strategy, w, h,
+                                  hover_x=spot, current_spot=self._current_spot))
 
     def on_leave(self, event=None) -> None:
         """Clear crosshair and reset tooltip to placeholder state."""
@@ -522,119 +550,146 @@ class ChartWidget(Static):
         self._reset_tooltip()
         w = max(self.size.width  or 80, 20)
         h = max(self.size.height or 24,  8)
-        self.update(_render_chart(self._strategy, w, h))
+        self.update(_render_chart(self._strategy, w, h,
+                                  current_spot=self._current_spot))
 
 
 # ── Panel Widget subclasses (each has its own compose so context managers work)
 
-class DashboardTab(Horizontal):
-    """Left builder + right chart panel."""
+class ToastContainer(Static):
+    """Bottom-right toast notification overlay. Shows a message for ~2.5s."""
 
-    DEFAULT_CSS = "DashboardTab { height: 1fr; }"
+    DEFAULT_CSS = ""
+
+    def on_mount(self) -> None:
+        self.display = False
+
+    def show(self, msg: str, style: str = C_GREEN, duration: float = 2.5) -> None:
+        t = RichText()
+        t.append(f"  ✓  {msg}  ", style=f"{style} bold")
+        self.update(t)
+        self.display = True
+        self.set_timer(duration, self._hide)
+
+    def _hide(self) -> None:
+        self.display = False
+        self.update("")
+
+
+class ConfirmModal(ModalScreen[bool]):
+    """Generic Yes/No confirmation dialog."""
+
+    DEFAULT_CSS = """
+    ConfirmModal {
+        align: center middle;
+    }
+    ConfirmModal > #confirm-box {
+        width: 56;
+        height: 9;
+        background: #0d0500;
+        border: solid #FF4500;
+        padding: 1 2;
+    }
+    ConfirmModal #confirm-msg {
+        height: 3;
+        content-align: center middle;
+        color: #FF8C00;
+        text-style: bold;
+    }
+    ConfirmModal #confirm-actions {
+        height: 3;
+        align: center middle;
+    }
+    ConfirmModal Button {
+        margin: 0 2;
+        min-width: 12;
+    }
+    """
+
+    def __init__(self, message: str) -> None:
+        super().__init__()
+        self._message = message
 
     def compose(self) -> ComposeResult:
-        with VerticalScroll(id="left-panel"):
-            yield Button("⟲ RESET ALL", id="btn-reset-all", classes="reset-btn")
-            yield Label("STRATEGY", classes="section-label")
-            yield Input(placeholder="Strategy name…",
-                        value="Custom Strategy", id="inp-name")
-            yield Input(placeholder="Ticker (AAPL, SPY…)", id="inp-ticker")
+        with Vertical(id="confirm-box"):
+            yield Static(self._message, id="confirm-msg")
+            with Horizontal(id="confirm-actions"):
+                yield Button("Confirm", id="confirm-yes", variant="primary")
+                yield Button("Cancel", id="confirm-no")
 
-            yield Label("PRESETS", classes="section-label")
-            yield Select([(k, k) for k in PRESETS],
-                         value="— none —", id="sel-preset")
-            yield Button("Load Preset", id="btn-load-preset")
+    @on(Button.Pressed, "#confirm-yes")
+    def _yes(self) -> None:
+        self.dismiss(True)
 
-            yield Label("ADD LEG", classes="section-label")
-            yield Select([("call","call"),("put","put"),("stock","stock")],
-                         value="call", id="sel-type")
-            yield Select([("long","long"),("short","short")],
-                         value="long", id="sel-pos")
-            yield Input(placeholder="Strike / Entry", value="100.00", id="inp-strike")
-            yield Static("", id="move-required", classes="move-required-info")
-            yield Input(placeholder="Premium",        value="3.50",   id="inp-prem")
-            yield Input(placeholder="Quantity",       value="1",      id="inp-qty")
-            yield Input(placeholder="Expiry YYYY-MM-DD",
-                        value=(date.today() + timedelta(days=90)).strftime("%Y-%m-%d"),
-                        id="inp-expiry")
-            yield Button("+ Add Leg", id="btn-add", variant="primary")
-
-            yield Label("LEGS", classes="section-label")
-            yield DataTable(id="legs-table", cursor_type="row")
-            with Horizontal(id="dash-legs-actions"):
-                yield Button("Clear All",   id="clear-btn")
-                yield Button("Remove Row",  id="btn-remove")
-
-            with Vertical(id="target-section"):
-                yield Label("TARGET PRICE (optional)", classes="section-label")
-                yield Input(placeholder="0.00", value="", id="inp-target")
-                yield Static("", id="target-pnl-info")
-
-        with Vertical(id="right-panel"):
-            yield MetricsBar(id="metrics-bar")
-            yield Static("", id="target-info",  classes="target-info")
-            yield Static("", id="status-msg")
-            yield Static("", id="chart-hover-info", classes="hover-info")
-            yield ChartWidget(id="chart-widget", tooltip_id="#chart-hover-info")
-            with Horizontal(id="action-row"):
-                yield Button("Save Chart", id="save-btn")
-                yield Button("Export PDF", id="pdf-btn")
-                yield Static("", id="action-status")
+    @on(Button.Pressed, "#confirm-no")
+    def _no(self) -> None:
+        self.dismiss(False)
 
 
 class LiveDataTab(Horizontal):
-    """Live market data fetcher."""
+    """Strategy Builder — live market data + multi-leg builder."""
 
     DEFAULT_CSS = "LiveDataTab { height: 1fr; }"
 
     def compose(self) -> ComposeResult:
         with VerticalScroll(id="live-form"):
             yield Button("⟲ RESET ALL", id="live-reset-all", classes="reset-btn")
-            yield Label("STRATEGY NAME", classes="section-label")
-            yield Input(placeholder="Strategy name…",
-                        value="Custom Strategy", id="live-inp-name")
 
-            yield Label("LIVE MARKET DATA", classes="section-label")
-            yield Input(placeholder="Ticker (AAPL, SPY…)", id="live-ticker")
-            yield Button("Fetch Expiries", id="btn-fetch", variant="primary")
-            yield Static("", id="live-spot-label")
+            with Collapsible(title="DATA SOURCE", collapsed=False, id="sec-data"):
+                yield Label("Ticker")
+                yield Input(placeholder="Ticker (AAPL, SPY…)", id="live-ticker")
+                yield Button("Fetch Expiries", id="btn-fetch", variant="primary")
+                yield Static("", id="live-spot-label")
+                yield Label("Expiry")
+                yield Select([], id="sel-expiry", allow_blank=True)
+                yield Button("Load Chain", id="btn-chain")
 
-            yield Label("TARGET PRICE", classes="section-label")
-            yield Input(placeholder="Target Price (e.g. 155.00)", id="live-target")
-            yield Label("BUDGET", classes="section-label")
-            yield Input(placeholder="Max Budget (e.g. 500.00)", id="live-budget")
+            with Collapsible(title="STRATEGY SETUP", collapsed=False, id="sec-setup"):
+                yield Label("Strategy Name")
+                yield Input(placeholder="Strategy name…",
+                            value="Custom Strategy", id="live-inp-name")
+                yield Label("Target Price")
+                yield Input(placeholder="Target Price (e.g. 155.00)", id="live-target")
+                yield Label("Budget")
+                yield Input(placeholder="Max Budget (e.g. 500.00)", id="live-budget")
+                yield Label("Price Type")
+                yield Select([("Bid", "bid"), ("Mid", "mid"), ("Ask", "ask")],
+                             value="mid", id="live-price-src", allow_blank=False)
+                yield Label("Option Type")
+                with Horizontal(classes="toggle-row"):
+                    yield Button("CALL", id="tgl-opt-call",
+                                 classes="toggle-btn -active")
+                    yield Button("PUT",  id="tgl-opt-put",  classes="toggle-btn")
+                yield Label("Direction")
+                with Horizontal(classes="toggle-row"):
+                    yield Button("LONG",  id="tgl-pos-long",
+                                 classes="toggle-btn -active")
+                    yield Button("SHORT", id="tgl-pos-short", classes="toggle-btn")
+                yield Label("Contracts")
+                yield Input(placeholder="Quantity", value="1", id="live-qty")
+                yield Label("Strike")
+                yield Static("", id="live-strike-label")
+                yield Select([], id="sel-strike", allow_blank=True)
 
-            yield Label("EXPIRY", classes="section-label")
-            yield Select([], id="sel-expiry", allow_blank=True)
-            yield Button("Load Chain", id="btn-chain")
-            yield Rule()
-
-            yield Label("ADD TO STRATEGY", classes="section-label")
-            yield Label("OPTION TYPE", classes="section-label")
-            yield Select([("call","call"),("put","put")],
-                         value="call", id="live-opt-type")
-            yield Label("DIRECTION", classes="section-label")
-            yield Select([("long","long"),("short","short")],
-                         value="long", id="live-opt-pos")
-            yield Select([("mid","mid"),("bid","bid"),("ask","ask"),("lastPrice","lastPrice")],
-                         value="mid", id="live-price-src")
-            yield Input(placeholder="Quantity", value="1", id="live-qty")
-            yield Static("", id="live-strike-label")
-            yield Select([], id="sel-strike", allow_blank=True)
-            yield Button("Add Live Leg", id="btn-live-add", variant="primary")
-            yield Static("", id="live-status")
-
-            yield Rule()
-            yield Label("STRATEGY LEGS", classes="section-label")
-            yield DataTable(id="live-legs-table", cursor_type="row")
-            with Horizontal(id="live-legs-actions"):
-                yield Button("Clear All", id="live-clear-btn", classes="danger-btn")
-                yield Button("Remove Leg", id="live-remove-btn")
+            with Collapsible(title="LEGS", collapsed=False, id="sec-legs"):
+                yield Button("Add Live Leg", id="btn-live-add", variant="primary")
+                yield Static("", id="live-status")
+                yield DataTable(id="live-legs-table", cursor_type="row")
+                with Horizontal(id="live-legs-actions"):
+                    yield Button("Clear All",  id="live-clear-btn",
+                                 classes="danger-btn")
+                    yield Button("Remove Leg", id="live-remove-btn")
 
         with Vertical(id="live-right-panel"):
             # ── Option chain (upper section) ─────────────────────────────
             with Vertical(id="chain-panel"):
                 yield Label("OPTION CHAIN", classes="section-label")
+                yield Static(
+                    "  IV=Implied Volatility · OI=Open Interest · "
+                    "Vol=Volume Today · Δ=Delta",
+                    id="chain-legend",
+                    classes="chain-legend",
+                )
                 yield DataTable(id="chain-table", cursor_type="row")
 
             # ── Payoff diagram + metrics (lower section) ─────────────────
@@ -642,7 +697,8 @@ class LiveDataTab(Horizontal):
             yield Static("", id="live-target-info", classes="target-info")
             yield Static("", id="live-cost-info",   classes="cost-info")
             yield Static("", id="live-chart-hover-info", classes="hover-info")
-            yield ChartWidget(id="live-chart-widget", tooltip_id="#live-chart-hover-info")
+            yield ChartWidget(id="live-chart-widget",
+                              tooltip_id="#live-chart-hover-info")
             with Horizontal(id="live-action-row"):
                 yield Button("Save", id="live-save-btn")
                 yield Button("Export PDF", id="live-pdf-btn")
@@ -694,9 +750,10 @@ _HELP_TEXT = """\
 [bold #00E5FF]╚══════════════════════════════════════════════════════════════════════╝[/]
 
 [bold #FF8C00]QUICK START[/]
-  1. Go to the [bold #00E5FF]DASHBOARD[/] tab.
-  2. Pick a [bold]Preset[/] (e.g. "Iron Condor") and press [bold]Load Preset[/].
-  3. The payoff chart and metrics update instantly.
+  1. Go to the [bold #00E5FF]STRATEGY BUILDER[/] tab.
+  2. Enter a ticker, press [bold]Fetch Expiries[/], pick an expiry, then [bold]Load Chain[/].
+  3. Click an option-chain row to set the Strike, choose CALL/PUT and LONG/SHORT,
+     then press [bold #00FF41]Add Live Leg[/]. The payoff chart updates instantly.
   4. Press [bold #FFE000]Ctrl+S[/] to save, or [bold #FFE000]Ctrl+P[/] to export a PDF to ~/Downloads/.
 
 [bold #FF8C00]NAVIGATION[/]
@@ -715,67 +772,32 @@ _HELP_TEXT = """\
   [bold #FFE000]Tab[/]      Move focus to next widget
   [bold #FFE000]Shift+Tab[/] Move focus to previous widget
 
-[bold #FF8C00]DASHBOARD TAB[/]  (manual strategy builder)
-  ┌─ LEFT PANEL ──────────────────────────────────────────────────────────┐
-  │  [bold]Strategy name[/]  — label shown in charts and saved files.               │
-  │  [bold]Ticker[/]         — used in PDF exports (cosmetic, not required).        │
-  │  [bold]Presets[/]        — load a ready-made strategy in one click.             │
-  │                                                                       │
-  │  ADD LEG fields:                                                      │
-  │    [bold]Type[/]    call / put / stock  (stock = equity position)              │
-  │    [bold]Pos[/]     long (buy) or short (sell/write)                           │
-  │    [bold]Strike[/]  option strike price or stock entry price                   │
-  │    [bold]Premium[/] option cost per share (ignored for stock legs)             │
-  │    [bold]Qty[/]     number of contracts / shares                               │
-  │    [bold]Expiry[/]  YYYY-MM-DD format                                          │
-  │    Press [bold #00FF41]+ Add Leg[/] to append the leg.                                   │
-  │                                                                       │
-  │  LEGS table — select a row then press [bold]Remove Row[/] to delete it.       │
-  │  [bold]Clear All[/] removes every leg instantly.                               │
-  │                                                                       │
-  │  [bold]Target Price[/] — draws a vertical marker on the chart and shows       │
-  │    the expected P&L at that spot price.                               │
+[bold #FF8C00]STRATEGY BUILDER TAB[/]  (live option chains from Yahoo Finance)
+  ┌─ LEFT PANEL — collapsible sections ────────────────────────────────────┐
+  │  [bold]DATA SOURCE[/]      Ticker · Fetch Expiries · Expiry · Load Chain         │
+  │  [bold]STRATEGY SETUP[/]   Strategy Name · Target Price · Budget · Price Type    │
+  │                     Option Type [CALL/PUT] · Direction [LONG/SHORT]    │
+  │                     Contracts · Strike                                 │
+  │  [bold]LEGS[/]             Add Live Leg · legs table · Clear All / Remove Leg    │
   └───────────────────────────────────────────────────────────────────────┘
   ┌─ RIGHT PANEL ─────────────────────────────────────────────────────────┐
+  │  [bold #00E5FF]Option Chain[/]  Strike · Bid · Mid · Ask · IV · OI · Vol · Δ          │
+  │    The ATM strike row is highlighted in [bold #FFE000]amber[/].                          │
+  │    Click any row to auto-fill the [bold]Strike[/] field in Strategy Setup.    │
+  │                                                                       │
   │  [bold #00E5FF]Metrics bar[/]  NET PREMIUM · MAX PROFIT · MAX LOSS · BREAKEVEN(S)   │
-  │    [#00FF41]Green[/] = credit/profit  [#FF3333]Red[/] = debit/loss  [#FFE000]Yellow[/] = breakeven        │
+  │  [bold #00E5FF]Payoff chart[/]  Profit (green) / Loss (red) zones, breakeven labels │
+  │    and a cyan vertical marker at the current spot price.              │
   │                                                                       │
-  │  [bold #00E5FF]Payoff chart[/]  ASCII diagram rendered by plotext.                   │
-  │    [#00FF41]Green fill[/]  = profit zone  [#FF3333]Red fill[/]  = loss zone                │
-  │    [#FFE000]Yellow line[/] = breakeven(s)                                       │
-  │                                                                       │
-  │  [bold]Save Chart[/]  — serialises strategy to saved_charts/ (JSON).          │
+  │  [bold]Save[/]        — serialises strategy to saved_charts/ (JSON).          │
   │  [bold]Export PDF[/]  — generates a PDF report via ReportLab and saves        │
-  │    to ~/Downloads/ and saved_pdfs/                                    │
+  │                  to ~/Downloads/ and saved_pdfs/                      │
   └───────────────────────────────────────────────────────────────────────┘
 
-[bold #FF8C00]LIVE DATA TAB[/]  (fetch real option chains from Yahoo Finance)
-  1. Type a ticker (e.g. [bold]AAPL[/]) and press [bold #00FF41]Fetch Expiries[/].
-     The live spot price is shown in green when fetched.
-  2. Select an [bold]Expiry[/] date from the dropdown.
-  3. Press [bold]Load Chain[/] — the option chain fills the right panel.
-  4. Choose [bold]Option type[/] (call/put), [bold]Position[/], [bold]Price source[/] (mid/bid/ask).
-  5. Pick a [bold]Strike[/] from the dropdown.
-  6. Press [bold #00FF41]Add Live Leg[/] — the leg is added to your strategy.
-  Switch back to [bold]DASHBOARD[/] to see the updated chart.
-
-[bold #FF8C00]SAVED TAB[/]
+[bold #FF8C00]MY STRATEGIES TAB[/]
   Lists all previously saved strategies (newest first).
   Click a row to view details (legs, metrics) in the right panel.
   [bold]Delete Selected[/] removes the file permanently.
-
-[bold #FF8C00]AVAILABLE PRESETS[/]
-  [#FF8C00]Long Call[/]           Buy a call — unlimited upside, limited loss.
-  [#FF8C00]Short Put[/]           Sell a put — collect premium, bullish/neutral.
-  [#FF8C00]Bull Call Spread[/]    Buy low-K call, sell high-K call. Capped profit/loss.
-  [#FF8C00]Bear Call Spread[/]    Sell low-K call, buy high-K call. Net credit, bearish.
-  [#FF8C00]Bull Put Spread[/]     Net credit spread. Profit if underlying stays above.
-  [#FF8C00]Long Straddle[/]       Buy ATM call + put. Profit from big moves either way.
-  [#FF8C00]Long Strangle[/]       Buy OTM call + OTM put. Cheaper straddle, wider BEs.
-  [#FF8C00]Long Call Butterfly[/] 3-leg. Profit when underlying pins near middle strike.
-  [#FF8C00]Iron Condor[/]         4-leg. Net credit; profit inside a price range.
-  [#FF8C00]Covered Call[/]        Long stock + short call. Income; caps upside.
-  [#FF8C00]Protective Put[/]      Long stock + long put. Insurance against downside.
 
 [bold #FF8C00]METRICS GLOSSARY[/]
   [bold]Net Premium[/]   CR = net credit received. DR = net debit paid.
@@ -815,7 +837,6 @@ class OptionsTUI(App[None]):
 
     CSS_PATH  = "tui.tcss"
     TITLE     = "OPTIONS TERMINAL"
-    SUB_TITLE = "payoff analysis · bloomberg style"
 
     BINDINGS = [
         Binding("q",      "quit",                "Quit"),
@@ -845,67 +866,82 @@ class OptionsTUI(App[None]):
     _live_expiry: str = ""
     _saved_cache: list[dict] = []
 
+    # toggle-button state (replaces former Select widgets)
+    _opt_type: str = "call"   # "call" | "put"
+    _opt_pos:  str = "long"   # "long" | "short"
+
     # ── compose ─────────────────────────────────────────────────────────────
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
         with TabbedContent(id="tabs"):
-            with TabPane("LIVE DATA", id="tab-live"):
+            with TabPane("STRATEGY BUILDER", id="tab-live"):
                 yield LiveDataTab()
-            with TabPane("MANUAL ENTRY", id="tab-dashboard"):
-                yield DashboardTab()
-            with TabPane("SAVED", id="tab-saved"):
+            with TabPane("MY STRATEGIES", id="tab-saved"):
                 yield SavedTab()
             with TabPane("BACKTESTING", id="tab-backtesting"):
                 yield BacktestingTab()
             with TabPane("? HELP", id="tab-help"):
                 yield HelpTab()
+        yield ToastContainer(id="toast-container")
         yield Footer()
 
     # ── on_mount ─────────────────────────────────────────────────────────────
     def on_mount(self) -> None:
-        legs_tbl: DataTable = self.query_one("#legs-table")
-        legs_tbl.add_columns("#", "Type", "Pos", "Strike", "Prem", "Qty", "Expiry")
-
         live_legs_tbl: DataTable = self.query_one("#live-legs-table")
         live_legs_tbl.add_columns("#", "Type", "Pos", "Strike", "Prem", "Qty", "Expiry")
 
         chain_tbl: DataTable = self.query_one("#chain-table")
-        chain_tbl.add_columns("Strike", "Bid", "Mid", "Ask", "IV", "OI", "Vol")
+        chain_tbl.add_columns("Strike", "Bid", "Mid", "Ask", "IV", "OI", "Vol", "Δ")
+        # Header tooltips — shown by Textual on hover.
+        try:
+            chain_tbl.show_header = True
+        except Exception:
+            pass
 
         saved_tbl: DataTable = self.query_one("#saved-table")
         saved_tbl.add_columns("Strategy", "Ticker", "Date Saved")
         self._refresh_saved_table()
 
-        # Target price section is hidden until a multi-directional strategy is loaded
-        self.query_one("#target-section").display = False
+        # Tooltips on widgets that map to chain columns (best-effort hover hints).
+        try:
+            self.query_one("#chain-legend", Static).tooltip = (
+                "IV: Implied Volatility — market's expectation of future price movement\n"
+                "OI: Open Interest — total number of outstanding contracts\n"
+                "Vol: Volume — number of contracts traded today\n"
+                "Δ:  Delta — rate of change of option price vs spot price "
+                "(0..1 calls, -1..0 puts)"
+            )
+        except Exception:
+            pass
 
         # Apply CLI arguments
         if self._cli_session_name:
             self.title = self._cli_session_name
         if self._cli_ticker:
-            self.query_one("#inp-ticker", Input).value = self._cli_ticker
             self.query_one("#live-ticker", Input).value = self._cli_ticker
 
     # ── Legs helpers ─────────────────────────────────────────────────────────
     def _refresh_legs_table(self) -> None:
-        for tbl_id in ("#legs-table", "#live-legs-table"):
-            tbl: DataTable = self.query_one(tbl_id)
-            tbl.clear()
-            for i, L in enumerate(self.legs, 1):
-                tbl.add_row(str(i), L["type"], L["pos"],
-                            f"{float(L['K']):.2f}",
-                            f"{float(L.get('prem',0)):.2f}",
-                            str(L["qty"]), L["expiry"])
+        try:
+            tbl: DataTable = self.query_one("#live-legs-table", DataTable)
+        except Exception:
+            return
+        tbl.clear()
+        for i, L in enumerate(self.legs, 1):
+            tbl.add_row(str(i), L["type"], L["pos"],
+                        f"{float(L['K']):.2f}",
+                        f"{float(L.get('prem',0)):.2f}",
+                        str(L["qty"]), L["expiry"])
 
     def _rebuild_and_render(self) -> None:
         if not self.legs:
             for cw in self.query(ChartWidget):
                 cw.update(RichText(" No legs — add at least one leg.", style=C_AMBER))
-            for wid in ("#target-info", "#live-target-info"):
+            for wid in ("#live-target-info",):
                 try: self.query_one(wid, Static).update(RichText(""))
                 except Exception: pass
             return
-        name     = self.query_one("#inp-name", Input).value.strip() or "Strategy"
+        name     = self.query_one("#live-inp-name", Input).value.strip() or "Strategy"
         strategy = _build_strategy(name, self.legs)
         spot_arr = strategy._auto_spot_range()
         summary  = strategy.summary(spot_arr)
@@ -919,25 +955,11 @@ class OptionsTUI(App[None]):
         if ana_l is not None:
             summary["max_loss"] = ana_l
 
-        # Update Dashboard tab widgets
-        self.query_one("#metrics-bar",     MetricsBar).update_metrics(summary)
-        self.query_one("#chart-widget",    ChartWidget).refresh_chart(strategy, self._live_spot)
-
-        # Update Live Data tab widgets (always in sync)
+        # Update Strategy Builder widgets
         self.query_one("#live-metrics-bar",  MetricsBar).update_metrics(summary)
         self.query_one("#live-chart-widget", ChartWidget).refresh_chart(strategy, self._live_spot)
         self._update_cost_info(summary)
         self._update_target_info(strategy)
-
-        # Show/hide target-price section and update inline P&L display
-        multi = _is_multi_directional(self.legs)
-        try:
-            self.query_one("#target-section").display = multi
-        except Exception:
-            pass
-        self._update_move_required()
-        if multi:
-            self._update_target_pnl_info(strategy)
 
     def _update_cost_info(self, summary: dict) -> None:
         """Show net cost per contract (and budget) in the Live Data panel."""
@@ -952,10 +974,12 @@ class OptionsTUI(App[None]):
 
     def _update_target_info(self, strategy: Strategy) -> None:
         """Compute and display Profit @ Target and Move Required."""
+        try:
+            wid = self.query_one("#live-target-info", Static)
+        except Exception:
+            return
         if self.target_price is None:
-            for wid in ("#target-info", "#live-target-info"):
-                try: self.query_one(wid, Static).update(RichText(""))
-                except Exception: pass
+            wid.update(RichText(""))
             return
         pnl  = strategy.realized_payoff(self.target_price)
         spot = self._live_spot or 0.0
@@ -967,123 +991,25 @@ class OptionsTUI(App[None]):
             sign = "+" if pct >= 0 else ""
             t.append("   Move Required: ", style=C_DIM)
             t.append(f"{sign}{pct:.2f}%", style=C_CYAN)
-        for wid in ("#target-info", "#live-target-info"):
-            try: self.query_one(wid, Static).update(t)
-            except Exception: pass
+        wid.update(t)
 
-    def _update_move_required(self) -> None:
-        """Show distance from current spot to the strike entered in the Dashboard."""
-        try:
-            wid = self.query_one("#move-required", Static)
-        except Exception:
-            return
-        try:
-            strike_str = self.query_one("#inp-strike", Input).value.strip()
-            if not strike_str:
-                wid.update("")
-                return
-            strike = float(strike_str)
-            spot   = self._live_spot
-            if spot is None or spot <= 0:
-                wid.update("")
-                return
-            dist      = strike - spot
-            pct       = (dist / spot) * 100
-            sign      = "+" if dist >= 0 else ""
-            direction = "UP" if dist >= 0 else "DOWN"
-            t = RichText()
-            t.append(
-                f"  Move required: {sign}${dist:,.2f} ({sign}{pct:.2f}% {direction})",
-                style=C_CYAN if dist >= 0 else C_RED,
-            )
-            wid.update(t)
-        except (ValueError, Exception):
-            try:
-                wid.update("")
-            except Exception:
-                pass
-
-    def _update_target_pnl_info(self, strategy: Strategy) -> None:
-        """For multi-directional strategies, show P&L at the target price below the input."""
-        try:
-            info = self.query_one("#target-pnl-info", Static)
-        except Exception:
-            return
-        target_str = self.query_one("#inp-target", Input).value.strip()
-        if not target_str:
-            info.update("")
-            return
-        try:
-            target = float(target_str)
-        except ValueError:
-            info.update("")
-            return
-        pnl  = strategy.realized_payoff(target)
-        sign = "+" if pnl >= 0 else ""
-        pnl_str   = f"{sign}{_fmt_money(pnl)}"
-        pnl_style = C_GREEN if pnl >= 0 else C_RED
-        t = RichText()
-        t.append(f"  If UP to ${target:,.2f}: P&L = ", style=C_DIM)
-        t.append(pnl_str, style=pnl_style)
-        t.append("\n")
-        t.append(f"  If DOWN to ${target:,.2f}: P&L = ", style=C_DIM)
-        t.append(pnl_str, style=pnl_style)
-        info.update(t)
-
-    # ── Dashboard button handlers ─────────────────────────────────────────────
-    @on(Button.Pressed, "#btn-load-preset")
-    def handle_load_preset(self) -> None:
-        key = self.query_one("#sel-preset", Select).value
-        if key == Select.BLANK or key not in PRESETS or PRESETS[key] is None:
-            self._set_status("Select a preset first.")
-            return
-        self.legs = [dict(L) for L in PRESETS[key]]
-        self.query_one("#inp-name", Input).value = str(key)
-        self._refresh_legs_table()
-        self._rebuild_and_render()
-        self._set_status(f"Loaded preset: {key}")
-
-    @on(Button.Pressed, "#btn-add")
-    def handle_add_leg(self) -> None:
-        try:
-            leg_type = str(self.query_one("#sel-type",  Select).value)
-            pos      = str(self.query_one("#sel-pos",   Select).value)
-            strike   = float(self.query_one("#inp-strike", Input).value)
-            prem     = float(self.query_one("#inp-prem",   Input).value) \
-                       if leg_type != "stock" else 0.0
-            qty      = int(self.query_one("#inp-qty",   Input).value)
-            expiry   = self.query_one("#inp-expiry",    Input).value.strip()
-            datetime.strptime(expiry, "%Y-%m-%d")   # validate
-        except ValueError as exc:
-            self._set_status(f"Invalid input: {exc}")
-            return
-        self.legs = self.legs + [
-            dict(type=leg_type, pos=pos, K=strike, prem=prem, qty=qty, expiry=expiry)
-        ]
-        self._refresh_legs_table()
-        self._rebuild_and_render()
-        self._set_status(f"Added {pos} {leg_type} K={strike:.2f}")
-
-    @on(Button.Pressed, "#btn-reset-all")
+    # ── Reset confirmation ───────────────────────────────────────────────────
     @on(Button.Pressed, "#live-reset-all")
     def handle_reset_all(self) -> None:
-        self._reset_all()
+        def _on_close(confirmed: bool | None) -> None:
+            if confirmed:
+                self._reset_all()
+        self.push_screen(
+            ConfirmModal("Are you sure you want to reset everything?"),
+            _on_close,
+        )
 
     def _reset_all(self) -> None:
         """Wipe every input, select, chain, and piece of state back to defaults."""
         self.legs = []
         self._refresh_legs_table()
 
-        # Dashboard inputs
         defaults_inputs = {
-            "#inp-name":   "Custom Strategy",
-            "#inp-ticker": "",
-            "#inp-strike": "100.00",
-            "#inp-prem":   "3.50",
-            "#inp-qty":    "1",
-            "#inp-expiry": (date.today() + timedelta(days=90)).strftime("%Y-%m-%d"),
-            "#inp-target": "",
-            # Live inputs
             "#live-inp-name": "Custom Strategy",
             "#live-ticker":   "",
             "#live-target":   "",
@@ -1094,23 +1020,19 @@ class OptionsTUI(App[None]):
             try: self.query_one(sel, Input).value = val
             except Exception: pass
 
-        # Selects with fixed option sets
-        fixed_selects = {
-            "#sel-preset":     "— none —",
-            "#sel-type":       "call",
-            "#sel-pos":        "long",
-            "#live-opt-type":  "call",
-            "#live-opt-pos":   "long",
-            "#live-price-src": "mid",
-        }
-        for sel, val in fixed_selects.items():
-            try: self.query_one(sel, Select).value = val
-            except Exception: pass
+        # Price-type Select
+        try: self.query_one("#live-price-src", Select).value = "mid"
+        except Exception: pass
 
         # Dynamic selects — clear options entirely
         for sel_id in ("#sel-expiry", "#sel-strike"):
             try: self.query_one(sel_id, Select).set_options([])
             except Exception: pass
+
+        # Reset toggle button state
+        self._opt_type = "call"
+        self._opt_pos  = "long"
+        self._sync_toggle_buttons()
 
         # Clear chain table
         try: self.query_one("#chain-table", DataTable).clear()
@@ -1127,128 +1049,74 @@ class OptionsTUI(App[None]):
 
         # Clear status / info widgets
         for wid in ("#live-spot-label", "#live-strike-label", "#live-status",
-                    "#live-cost-info",  "#target-info", "#live-target-info",
-                    "#move-required",   "#target-pnl-info",
-                    "#action-status",   "#live-action-status",
-                    "#status-msg", "#chart-hover-info", "#live-chart-hover-info",
-                    "#saved-chart-hover-info"):
+                    "#live-cost-info",  "#live-target-info",
+                    "#live-action-status",
+                    "#live-chart-hover-info", "#saved-chart-hover-info"):
             try: self.query_one(wid, Static).update(RichText(""))
             except Exception: pass
 
-        # Reset metric bars back to dashes
-        for mb_id in ("#metrics-bar", "#live-metrics-bar"):
-            try: self.query_one(mb_id, MetricsBar).reset()
-            except Exception: pass
+        # Reset metric bar
+        try: self.query_one("#live-metrics-bar", MetricsBar).reset()
+        except Exception: pass
 
-        # Reset charts and hide the target-price section
+        # Reset charts
         for cw in self.query(ChartWidget):
             cw._strategy = None
             cw.update(RichText(" No legs — add at least one leg.", style=C_AMBER))
             cw._reset_tooltip()
-        try: self.query_one("#target-section").display = False
-        except Exception: pass
 
-        self._set_status("Reset complete — clean slate.")
+        self._set_live_status("Reset complete — clean slate.")
 
-    @on(Button.Pressed, "#clear-btn")
-    def handle_clear(self) -> None:
-        self.legs = []
-        self._refresh_legs_table()
-        self.query_one(ChartWidget).update(
-            RichText(" No legs — add at least one leg.", style=C_AMBER))
-        self._set_status("All legs cleared.")
-
-    @on(Button.Pressed, "#btn-remove")
-    def handle_remove(self) -> None:
-        tbl: DataTable = self.query_one("#legs-table")
-        row = tbl.cursor_row
-        if 0 <= row < len(self.legs):
-            removed = self.legs[row]
-            self.legs = [L for i, L in enumerate(self.legs) if i != row]
-            self._refresh_legs_table()
-            self._rebuild_and_render()
-            self._set_status(f"Removed leg {row+1}: {removed['type']} K={removed['K']}")
-        else:
-            self._set_status("Select a row in the legs table first.")
-
-    @on(Button.Pressed, "#save-btn")
-    def action_save(self) -> None:
-        if not self.legs:
-            self._set_action_status("No legs to save.", C_RED)
-            return
-        name     = self.query_one("#inp-name", Input).value.strip() or "Strategy"
-        ticker   = self.query_one("#inp-ticker", Input).value.strip().upper()
-        strategy = _build_strategy(name, self.legs)
-        spot_arr = strategy._auto_spot_range()
-        summary  = strategy.summary(spot_arr)
-        fname    = _save_chart_file(strategy, self.legs, summary, ticker)
-        self._refresh_saved_table()
-        self._set_action_status(f"Saved: {fname}", C_GREEN)
-
-    @on(Button.Pressed, "#pdf-btn")
-    def action_pdf(self) -> None:
-        if not self.legs:
-            self._set_action_status("No legs to export.", C_RED)
-            return
-        self._set_action_status("Generating PDF…", C_YELLOW)
-        self._do_export_pdf()
-
-    @work(thread=True)
-    def _do_export_pdf(self) -> None:
-        name     = self.query_one("#inp-name",   Input).value.strip() or "Strategy"
-        ticker   = self.query_one("#inp-ticker", Input).value.strip().upper() or name
-        target_s = self.query_one("#inp-target", Input).value.strip()
-        target   = float(target_s) if target_s else self.target_price
-
-        strategy = _build_strategy(name, self.legs)
-        spot_arr = strategy._auto_spot_range()
-        summary  = strategy.summary(spot_arr)
-
-        # Apply analytical override so PDF matches TUI metrics bar
-        ana_p, ana_l = _analytical_max_profit_loss(self.legs)
-        if ana_p is not None:
-            summary["max_profit"] = ana_p
-        if ana_l is not None:
-            summary["max_loss"] = ana_l
-
-        # Compute target analysis for PDF
-        profit_at_target = None
-        pct_move         = None
-        if target is not None:
+    # ── Toggle buttons (CALL/PUT, LONG/SHORT) ────────────────────────────────
+    def _sync_toggle_buttons(self) -> None:
+        pairs = (
+            ("#tgl-opt-call", self._opt_type == "call"),
+            ("#tgl-opt-put",  self._opt_type == "put"),
+            ("#tgl-pos-long", self._opt_pos  == "long"),
+            ("#tgl-pos-short",self._opt_pos  == "short"),
+        )
+        for sel, active in pairs:
             try:
-                profit_at_target = strategy.realized_payoff(target)
-                spot = summary.get("current_spot")
-                if spot and spot > 0:
-                    pct_move = ((target - spot) / spot) * 100
+                btn = self.query_one(sel, Button)
+                if active:
+                    btn.add_class("-active")
+                else:
+                    btn.remove_class("-active")
             except Exception:
                 pass
 
-        # export_pdf imported from utils/export_pdf.py
-        pdf_bytes, tex_src, fname_base = export_pdf(
-            fig                = None,
-            ticker             = ticker,
-            strategy_name      = name,
-            legs               = self.legs,
-            summary            = summary,
-            strategy           = strategy,
-            spot_range         = spot_arr,
-            target_price       = target,
-            profit_at_target   = profit_at_target,
-            pct_move_to_target = pct_move,
-        )
+    @on(Button.Pressed, "#tgl-opt-call")
+    def _toggle_opt_call(self) -> None:
+        self._opt_type = "call"
+        self._sync_toggle_buttons()
+        self._on_opt_type_changed()
 
-        out_bytes = pdf_bytes if pdf_bytes is not None else tex_src.encode()
-        out_ext   = ".pdf" if pdf_bytes is not None else ".tex"
-        out_fname = f"{fname_base}{out_ext}"
-        dl_path   = Path.home() / "Downloads" / out_fname
-        dl_path.write_bytes(out_bytes)
-        (SAVED_PDFS_DIR / out_fname).write_bytes(out_bytes)
+    @on(Button.Pressed, "#tgl-opt-put")
+    def _toggle_opt_put(self) -> None:
+        self._opt_type = "put"
+        self._sync_toggle_buttons()
+        self._on_opt_type_changed()
 
-        label = "PDF" if pdf_bytes else ".tex"
-        self.app.call_from_thread(
-            self._set_action_status,
-            f"{label} → ~/Downloads/{out_fname}", C_GREEN,
-        )
+    @on(Button.Pressed, "#tgl-pos-long")
+    def _toggle_pos_long(self) -> None:
+        self._opt_pos = "long"
+        self._sync_toggle_buttons()
+
+    @on(Button.Pressed, "#tgl-pos-short")
+    def _toggle_pos_short(self) -> None:
+        self._opt_pos = "short"
+        self._sync_toggle_buttons()
+
+    def _on_opt_type_changed(self) -> None:
+        """Re-render chain table when CALL/PUT toggle flips."""
+        if self._live_calls is None:
+            return
+        df = self._live_calls if self._opt_type == "call" else self._live_puts
+        if df is not None:
+            self._populate_chain_table(df)
+            strikes = sorted(df["strike"].tolist())
+            sel: Select = self.query_one("#sel-strike")
+            sel.set_options([(f"{s:.2f}", s) for s in strikes])
 
     @on(Button.Pressed, "#live-save-btn")
     def handle_live_save(self) -> None:
@@ -1265,6 +1133,14 @@ class OptionsTUI(App[None]):
         fname = _save_chart_file(strategy, self.legs, summary, ticker)
         self._refresh_saved_table()
         self._set_live_action_status(f"Saved: {fname}", C_GREEN)
+        self._show_toast("Strategy saved!")
+
+    # Backwards-compat alias for Ctrl+S binding
+    def action_save(self) -> None:
+        self.handle_live_save()
+
+    def action_pdf(self) -> None:
+        self.handle_live_pdf()
 
     @on(Button.Pressed, "#live-clear-btn")
     def handle_live_clear(self) -> None:
@@ -1272,7 +1148,14 @@ class OptionsTUI(App[None]):
         self._refresh_legs_table()
         for cw in self.query(ChartWidget):
             cw.update(RichText(" No legs — add at least one leg.", style=C_AMBER))
-        self.query_one("#live-cost-info", Static).update(RichText(""))
+        try:
+            self.query_one("#live-cost-info", Static).update(RichText(""))
+        except Exception:
+            pass
+        try:
+            self.query_one("#live-metrics-bar", MetricsBar).reset()
+        except Exception:
+            pass
         self._set_live_status("All legs cleared.")
 
     @on(Button.Pressed, "#live-remove-btn")
@@ -1411,8 +1294,7 @@ class OptionsTUI(App[None]):
             self._live_puts  = puts
 
             def _update() -> None:
-                opt_type = str(self.query_one("#live-opt-type", Select).value)
-                df = calls if opt_type == "call" else puts
+                df = calls if self._opt_type == "call" else puts
                 self._populate_chain_table(df)
                 strikes = sorted(df["strike"].tolist())
                 sel: Select = self.query_one("#sel-strike")
@@ -1429,27 +1311,56 @@ class OptionsTUI(App[None]):
     def _populate_chain_table(self, df) -> None:
         tbl: DataTable = self.query_one("#chain-table")
         tbl.clear()
-        cols = [c for c in ["strike","bid","mid","ask","impliedVolatility","openInterest","volume"]
-                if c in df.columns]
 
         def _int(v) -> str:
             """Convert to int string; return '—' for NaN/None/non-numeric."""
             try:
                 f = float(v)
-                return str(int(f)) if f == f else "—"   # f != f  ⟹  NaN
+                return str(int(f)) if f == f else "—"
             except (TypeError, ValueError):
                 return "—"
 
-        for _, row in df[cols].iterrows():
-            tbl.add_row(
-                f"{row['strike']:.2f}",
-                f"{row.get('bid',0):.2f}",
-                f"{row.get('mid',0):.2f}",
-                f"{row.get('ask',0):.2f}",
-                f"{row.get('impliedVolatility',0):.1%}" if "impliedVolatility" in row else "—",
+        def _delta(v) -> str:
+            try:
+                f = float(v)
+                if f != f:
+                    return "—"
+                return f"{f:+.2f}"
+            except (TypeError, ValueError):
+                return "—"
+
+        # Identify ATM strike (closest to current spot) so we can highlight it.
+        atm_strike: float | None = None
+        if self._live_spot and self._live_spot > 0:
+            try:
+                strikes = df["strike"].tolist()
+                atm_strike = min(strikes, key=lambda s: abs(float(s) - self._live_spot))
+            except Exception:
+                atm_strike = None
+
+        delta_col = "delta" if "delta" in df.columns else None
+
+        for _, row in df.iterrows():
+            strike = float(row["strike"])
+            cells = [
+                f"{strike:.2f}",
+                f"{row.get('bid', 0):.2f}",
+                f"{row.get('mid', 0):.2f}",
+                f"{row.get('ask', 0):.2f}",
+                (f"{row['impliedVolatility']:.1%}"
+                 if "impliedVolatility" in row and row["impliedVolatility"] == row["impliedVolatility"]
+                 else "—"),
                 _int(row.get("openInterest", 0)),
                 _int(row.get("volume", 0)),
-            )
+                _delta(row[delta_col]) if delta_col else "—",
+            ]
+
+            is_atm = atm_strike is not None and abs(strike - float(atm_strike)) < 1e-9
+            if is_atm:
+                styled = [RichText(c, style=f"{C_YELLOW} bold") for c in cells]
+                tbl.add_row(*styled, key=f"strike-{strike:.4f}")
+            else:
+                tbl.add_row(*cells, key=f"strike-{strike:.4f}")
 
     @on(Input.Changed, "#live-target")
     def handle_live_target_changed(self, event: Input.Changed) -> None:
@@ -1457,6 +1368,13 @@ class OptionsTUI(App[None]):
             self.target_price = float(event.value) if event.value.strip() else None
         except ValueError:
             self.target_price = None
+        if self.legs:
+            try:
+                name = self.query_one("#live-inp-name", Input).value.strip() or "Strategy"
+                strategy = _build_strategy(name, self.legs)
+                self._update_target_info(strategy)
+            except Exception:
+                pass
 
     @on(Input.Changed, "#live-budget")
     def handle_live_budget_changed(self, event: Input.Changed) -> None:
@@ -1465,41 +1383,31 @@ class OptionsTUI(App[None]):
         except ValueError:
             self.budget = None
 
-    @on(Input.Changed, "#inp-strike")
-    def handle_strike_changed(self, _event: Input.Changed) -> None:
-        self._update_move_required()
-
-    @on(Input.Changed, "#inp-target")
-    def handle_target_changed(self, event: Input.Changed) -> None:
-        try:
-            self.target_price = float(event.value) if event.value.strip() else None
-        except ValueError:
-            self.target_price = None
-        if self.legs and _is_multi_directional(self.legs):
-            try:
-                name     = self.query_one("#inp-name", Input).value.strip() or "Strategy"
-                strategy = _build_strategy(name, self.legs)
-                self._update_target_pnl_info(strategy)
-                self._update_target_info(strategy)
-            except Exception:
-                pass
-
-    @on(Select.Changed, "#live-opt-type")
-    def handle_chain_type(self, event: Select.Changed) -> None:
+    @on(DataTable.RowSelected, "#chain-table")
+    def handle_chain_row_selected(self, event: DataTable.RowSelected) -> None:
+        """Click a row to auto-fill the Strike select with that row's strike."""
         if self._live_calls is None:
             return
-        df = self._live_calls if event.value == "call" else self._live_puts
-        if df is not None:
-            self._populate_chain_table(df)
-            strikes = sorted(df["strike"].tolist())
-            sel: Select = self.query_one("#sel-strike")
-            sel.set_options([(f"{s:.2f}", s) for s in strikes])
+        df = self._live_calls if self._opt_type == "call" else self._live_puts
+        if df is None:
+            return
+        idx = event.cursor_row
+        strikes_in_order = df["strike"].tolist()
+        if not (0 <= idx < len(strikes_in_order)):
+            return
+        chosen = float(strikes_in_order[idx])
+        try:
+            sel: Select = self.query_one("#sel-strike", Select)
+            sel.value = chosen
+            self._set_live_status(f"Strike set to {chosen:.2f} (from chain).")
+        except Exception:
+            pass
 
     @on(Button.Pressed, "#btn-live-add")
     def handle_live_add(self) -> None:
         ticker   = self.query_one("#live-ticker",   Input).value.strip().upper()
-        opt_type = str(self.query_one("#live-opt-type",  Select).value)
-        pos      = str(self.query_one("#live-opt-pos",   Select).value)
+        opt_type = self._opt_type
+        pos      = self._opt_pos
         src      = str(self.query_one("#live-price-src", Select).value)
         strike_v = self.query_one("#sel-strike", Select).value
 
@@ -1521,11 +1429,6 @@ class OptionsTUI(App[None]):
             dict(type=opt_type, pos=pos, K=strike, prem=prem, qty=qty,
                  expiry=self._live_expiry, ticker=ticker)
         ]
-        self.query_one("#inp-ticker", Input).value = ticker
-        # Sync live name to Dashboard so _rebuild_and_render uses it
-        live_name = self.query_one("#live-inp-name", Input).value.strip()
-        if live_name:
-            self.query_one("#inp-name", Input).value = live_name
         self._refresh_legs_table()
         self._rebuild_and_render()
         self._set_live_status(f"Added {pos} {opt_type} K={strike:.2f} prem={prem:.2f} ({src})")
@@ -1730,21 +1633,25 @@ class OptionsTUI(App[None]):
         )
 
     # ── Status helpers ──────────────────────────────────────────────────────
-    def _set_status(self, msg: str) -> None:
-        self.query_one("#status-msg", Static).update(
-            RichText(f" {msg}", style=C_AMBER) if msg else RichText(""))
-
-    def _set_action_status(self, msg: str, style: str = C_AMBER) -> None:
-        self.query_one("#action-status", Static).update(
-            RichText(f"  {msg}", style=style))
-
     def _set_live_status(self, msg: str) -> None:
-        self.query_one("#live-status", Static).update(
-            RichText(f" {msg}", style=C_AMBER))
+        try:
+            self.query_one("#live-status", Static).update(
+                RichText(f" {msg}", style=C_AMBER))
+        except Exception:
+            pass
 
     def _set_live_action_status(self, msg: str, style: str = C_AMBER) -> None:
-        self.query_one("#live-action-status", Static).update(
-            RichText(f"  {msg}", style=style))
+        try:
+            self.query_one("#live-action-status", Static).update(
+                RichText(f"  {msg}", style=style))
+        except Exception:
+            pass
+
+    def _show_toast(self, msg: str, style: str = C_GREEN, duration: float = 2.5) -> None:
+        try:
+            self.query_one("#toast-container", ToastContainer).show(msg, style, duration)
+        except Exception:
+            pass
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

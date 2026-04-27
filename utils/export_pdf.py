@@ -68,13 +68,14 @@ def _chart_png_matplotlib(strategy, spot_range, tmpdir: str,
         total_pnl = strategy.payoff_at_expiry(spot_range)
 
         # ── Colours (print-friendly white background) ──
-        C_PROFIT  = "#d1fae5"   # light green fill
-        C_LOSS    = "#fee2e2"   # light red fill
+        C_PROFIT  = "#bbf7d0"   # light green fill (more vivid)
+        C_LOSS    = "#fecaca"   # light red fill (more vivid)
         C_LINE    = "#0f172a"   # near-black payoff line
         C_ZERO    = "#94a3b8"   # zero reference
         C_STRIKE  = "#cbd5e1"   # strike dotted
         C_BE      = "#b45309"   # breakeven amber
         C_TARGET  = "#0e7490"   # target teal
+        C_SPOT    = "#0891b2"   # current-spot cyan
         C_AXIS    = "#334155"
         C_GRID    = "#f1f5f9"
         PALETTE   = ["#2563eb","#7c3aed","#ea580c","#059669","#db2777"]
@@ -83,23 +84,28 @@ def _chart_png_matplotlib(strategy, spot_range, tmpdir: str,
         fig.patch.set_facecolor("white")
         ax.set_facecolor("white")
 
-        # Profit / loss fill zones
+        # Profit / loss fill zones (slightly stronger alpha)
         ax.fill_between(spot_range, total_pnl, 0,
-                        where=(total_pnl >= 0), color=C_PROFIT, alpha=0.8)
+                        where=(total_pnl >= 0), color=C_PROFIT,
+                        alpha=0.9, zorder=1, interpolate=True)
         ax.fill_between(spot_range, total_pnl, 0,
-                        where=(total_pnl < 0),  color=C_LOSS,   alpha=0.8)
+                        where=(total_pnl < 0),  color=C_LOSS,
+                        alpha=0.9, zorder=1, interpolate=True)
 
-        # Individual leg curves
+        # Individual leg curves — smooth thick lines, rounded joins/caps.
         if len(strategy.legs) > 1:
             for i, leg in enumerate(strategy.legs):
                 ax.plot(spot_range, leg.payoff_at_expiry(spot_range),
                         color=PALETTE[i % len(PALETTE)],
-                        linewidth=1.2, linestyle="--", alpha=0.7,
-                        label=leg.label)
+                        linewidth=1.8, linestyle="--", alpha=0.75,
+                        solid_capstyle="round", solid_joinstyle="round",
+                        dash_capstyle="round", antialiased=True,
+                        label=leg.label, zorder=4)
 
-        # Total P&L
-        ax.plot(spot_range, total_pnl, color=C_LINE, linewidth=2.2,
-                label="Total P&L", zorder=5)
+        # Total P&L — thick anti-aliased smooth line.
+        ax.plot(spot_range, total_pnl, color=C_LINE, linewidth=2.8,
+                solid_capstyle="round", solid_joinstyle="round",
+                antialiased=True, label="Total P&L", zorder=5)
 
         # Zero line
         ax.axhline(0, color=C_ZERO, linewidth=1.0, linestyle="--", zorder=3)
@@ -130,6 +136,23 @@ def _chart_png_matplotlib(strategy, spot_range, tmpdir: str,
                 fontsize=8, color=C_BE, fontweight="bold",
                 bbox=dict(boxstyle="round,pad=0.25", fc="white", ec=C_BE, lw=0.8),
                 arrowprops=dict(arrowstyle="-|>", color=C_BE, lw=0.9,
+                                shrinkA=3, shrinkB=3),
+                zorder=6,
+            )
+
+        # Current spot vertical marker (distinct cyan).
+        if current_spot is not None and float(spot_range[0]) <= float(current_spot) <= float(spot_range[-1]):
+            ax.axvline(float(current_spot), color=C_SPOT, linewidth=1.6,
+                       linestyle="-", alpha=0.85, zorder=4)
+            spot_text_y = y_top + y_rng * 0.20
+            ax.annotate(
+                f"Spot ${float(current_spot):.2f}",
+                xy=(float(current_spot), 0),
+                xytext=(float(current_spot), spot_text_y),
+                ha="center", va="bottom",
+                fontsize=8, color=C_SPOT, fontweight="bold",
+                bbox=dict(boxstyle="round,pad=0.25", fc="white", ec=C_SPOT, lw=0.8),
+                arrowprops=dict(arrowstyle="-|>", color=C_SPOT, lw=0.9,
                                 shrinkA=3, shrinkB=3),
                 zorder=6,
             )
