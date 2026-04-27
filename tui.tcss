@@ -206,8 +206,20 @@ Button.-primary {
     text-style: bold;
 }
 
+/* Keep the vivid amber border on the primary button even when focused —
+   the default Button:focus rule otherwise repaints it cyan and washes the
+   button out. */
+Button.-primary:focus {
+    background: #FF8C00;
+    border: solid #FFE000;
+    color: #000000;
+    text-style: bold;
+}
+
 Button.-primary:hover {
     background: #FFB347;
+    color: #000000;
+    text-style: bold;
 }
 
 Button#clear-btn {
@@ -485,7 +497,8 @@ Button#live-remove-btn:hover {
 
 /* ── Label ── */
 Label {
-    color: #664400;
+    color: #00E5FF;
+    text-style: bold;
     height: 1;
 }
 
@@ -503,7 +516,11 @@ Rule {
     padding: 0 1;
 }
 
-/* ── Toggle buttons (CALL/PUT, LONG/SHORT) ── */
+/* ── Toggle buttons (CALL/PUT, LONG/SHORT) ──
+   Note: don't use the class name "-active" — Textual reserves it for the
+   transient mouse-press state on Button, so anything we put there gets
+   wiped on the next interaction. We use "-selected" for our persistent
+   on/off state. */
 .toggle-row {
     height: 3;
     width: 100%;
@@ -524,9 +541,11 @@ Rule {
     color: #FF8C00;
 }
 
-.toggle-btn.-active {
+.toggle-btn.-selected,
+.toggle-btn.-selected:focus,
+.toggle-btn.-selected:hover {
     background: #FF8C00;
-    border: solid #FFB347;
+    border: solid #FFE000;
     color: #000000;
     text-style: bold;
 }

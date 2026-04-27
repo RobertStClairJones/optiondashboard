@@ -658,12 +658,12 @@ class LiveDataTab(Horizontal):
                 yield Label("Option Type")
                 with Horizontal(classes="toggle-row"):
                     yield Button("CALL", id="tgl-opt-call",
-                                 classes="toggle-btn -active")
+                                 classes="toggle-btn -selected")
                     yield Button("PUT",  id="tgl-opt-put",  classes="toggle-btn")
                 yield Label("Direction")
                 with Horizontal(classes="toggle-row"):
                     yield Button("LONG",  id="tgl-pos-long",
-                                 classes="toggle-btn -active")
+                                 classes="toggle-btn -selected")
                     yield Button("SHORT", id="tgl-pos-short", classes="toggle-btn")
                 yield Label("Contracts")
                 yield Input(placeholder="Quantity", value="1", id="live-qty")
@@ -1068,6 +1068,9 @@ class OptionsTUI(App[None]):
         self._set_live_status("Reset complete — clean slate.")
 
     # ── Toggle buttons (CALL/PUT, LONG/SHORT) ────────────────────────────────
+    # Use "-selected" rather than "-active": Textual already toggles "-active"
+    # for the brief mouse-press state on Button, so any custom "-active" we set
+    # gets clobbered on the next interaction.
     def _sync_toggle_buttons(self) -> None:
         pairs = (
             ("#tgl-opt-call", self._opt_type == "call"),
@@ -1079,9 +1082,9 @@ class OptionsTUI(App[None]):
             try:
                 btn = self.query_one(sel, Button)
                 if active:
-                    btn.add_class("-active")
+                    btn.add_class("-selected")
                 else:
-                    btn.remove_class("-active")
+                    btn.remove_class("-selected")
             except Exception:
                 pass
 
