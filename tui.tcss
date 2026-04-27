@@ -180,75 +180,83 @@ SelectOverlay > .option-list--option-highlighted {
     color: #000000;
 }
 
-/* ── Buttons ── */
+/* ── Buttons ──
+   Every Button uses border-color == background-color so it renders as one
+   uniform block. With mismatched colors Textual draws the border cell in
+   one shade and the inner content in another, which reads as a "smaller
+   inner rectangle" inside the outline. Keeping them equal removes that
+   nested look entirely. */
 Button {
-    background: #0d0500;
-    border: solid #FF4500;
+    background: #2a1000;
+    border: solid #2a1000;
     color: #FF8C00;
     height: 3;
     min-width: 8;
+    text-style: bold;
 }
 
 Button:hover {
     background: #FF4500;
+    border: solid #FF4500;
     color: #000000;
     text-style: bold;
 }
 
+/* Focus indicator without breaking the solid-block look: keep border equal
+   to background so no inner rectangle appears. The text-style toggle gives
+   a subtle hint that focus is on this button. */
 Button:focus {
-    border: solid #00E5FF;
+    text-style: bold reverse;
 }
 
-Button.-primary {
-    background: #FF8C00;
-    border: solid #FFB347;
-    color: #000000;
-    text-style: bold;
-}
-
-/* Keep the vivid amber border on the primary button even when focused —
-   the default Button:focus rule otherwise repaints it cyan and washes the
-   button out. */
+Button.-primary,
 Button.-primary:focus {
     background: #FF8C00;
-    border: solid #FFE000;
+    border: solid #FF8C00;
     color: #000000;
     text-style: bold;
 }
 
 Button.-primary:hover {
     background: #FFB347;
+    border: solid #FFB347;
     color: #000000;
     text-style: bold;
 }
 
 Button#clear-btn {
-    border: solid #FF3333;
+    background: #2a0500;
+    border: solid #2a0500;
     color: #FF3333;
 }
 
 Button#clear-btn:hover {
     background: #FF3333;
+    border: solid #FF3333;
     color: #000000;
 }
 
 Button#save-btn {
-    border: solid #00E5FF;
+    background: #001a26;
+    border: solid #001a26;
     color: #00E5FF;
 }
 
 Button#save-btn:hover {
     background: #00E5FF;
+    border: solid #00E5FF;
     color: #000000;
 }
 
 Button#pdf-btn {
-    border: solid #FFE000;
+    background: #2a2200;
+    border: solid #2a2200;
     color: #FFE000;
 }
 
 Button#pdf-btn:hover {
     background: #FFE000;
+    border: solid #FFE000;
     color: #000000;
 }
 
@@ -419,42 +427,50 @@ DataTable > .datatable--even-row {
 }
 
 Button#live-save-btn {
-    border: solid #00E5FF;
+    background: #001a26;
+    border: solid #001a26;
     color: #00E5FF;
 }
 
 Button#live-save-btn:hover {
     background: #00E5FF;
+    border: solid #00E5FF;
     color: #000000;
 }
 
 Button#live-pdf-btn {
-    border: solid #FFE000;
+    background: #2a2200;
+    border: solid #2a2200;
     color: #FFE000;
 }
 
 Button#live-pdf-btn:hover {
     background: #FFE000;
+    border: solid #FFE000;
     color: #000000;
 }
 
 .danger-btn {
-    border: solid #FF3333;
+    background: #2a0500;
+    border: solid #2a0500;
     color: #FF3333;
 }
 
 .danger-btn:hover {
     background: #FF3333;
+    border: solid #FF3333;
     color: #000000;
 }
 
 Button#live-remove-btn {
-    border: solid #FF8C00;
+    background: #2a1000;
+    border: solid #2a1000;
     color: #FF8C00;
 }
 
 Button#live-remove-btn:hover {
     background: #FF8C00;
+    border: solid #FF8C00;
     color: #000000;
 }
 
@@ -469,8 +485,8 @@ Button#live-remove-btn:hover {
 
 /* ── Reset-all button (danger, prominent) ── */
 .reset-btn {
-    background: #1a0500;
-    border: solid #FF3333;
+    background: #2a0500;
+    border: solid #2a0500;
     color: #FF3333;
     height: 3;
     width: 100%;
@@ -480,6 +496,7 @@ Button#live-remove-btn:hover {
 
 .reset-btn:hover {
     background: #FF3333;
+    border: solid #FF3333;
     color: #000000;
 }
 
@@ -533,14 +550,15 @@ Rule {
 .toggle-btn {
     width: 1fr;
     height: 3;
-    background: #0d0500;
-    border: solid #4a2800;
+    background: #1a0a00;
+    border: solid #1a0a00;
     color: #886040;
     text-style: bold;
 }
 
 .toggle-btn:hover {
-    background: #1a0a00;
+    background: #2a1500;
+    border: solid #2a1500;
     color: #FF8C00;
 }
 
@@ -548,7 +566,7 @@ Rule {
 .toggle-btn.-selected:focus,
 .toggle-btn.-selected:hover {
     background: #FF8C00;
-    border: solid #FFE000;
+    border: solid #FF8C00;
     color: #000000;
     text-style: bold;
 }
