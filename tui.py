@@ -248,6 +248,13 @@ C_CYAN   = "#00E5FF"
 C_YELLOW = "#FFE000"
 C_DIM    = "#664400"
 
+# ── Bloomberg-style stat-bar palette ─────────────────────────────────────────
+C_BB_LABEL = "#AAAAAA"   # dim light grey labels
+C_BB_WHITE = "#FFFFFF"   # neutral values (spot, breakeven, budget)
+C_BB_GREEN = "#39FF14"   # positive values + "Unlimited"
+C_BB_RED   = "#FF3333"   # negative values
+C_BB_GOLD  = "#FFD700"   # profit @ target price (always stands out)
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Helper functions – call into existing project modules
@@ -409,31 +416,36 @@ class MetricsBar(Horizontal):
         max_l = summary.get("max_loss",    0.0)
         be    = summary.get("breakeven_points", [])
 
-        def _cell(title: str, value: str) -> RichText:
-            # Both label and value rendered in bright amber for a uniform stat
-            # block — no dim brown labels, no green/red value coding.
+        def _cell(title: str, value: str, val_color: str) -> RichText:
             t = RichText()
-            t.append(f" {title}\n", style=f"{C_AMBER} bold")
-            t.append(f" {value}",   style=f"{C_AMBER} bold")
+            t.append(f" {title}\n", style=f"{C_BB_LABEL} bold")
+            t.append(f" {value}",   style=f"{val_color} bold")
             return t
 
-        self.query_one("#m-net").update(
-            _cell("NET PREMIUM",
-                  f"{'CR' if net >= 0 else 'DR'} ${abs(net):,.2f}"))
+        # NET PREMIUM — DR prefix + amount share the same red/green per sign.
+        net_color = C_BB_GREEN if net >= 0 else C_BB_RED
+        net_str   = f"{'CR' if net >= 0 else 'DR'} ${abs(net):,.2f}"
+        self.query_one("#m-net").update(_cell("NET PREMIUM", net_str, net_color))
+
+        # MAX PROFIT is always green (covers "Unlimited" too).
         self.query_one("#m-profit").update(
-            _cell("MAX PROFIT", _fmt_money(max_p)))
+            _cell("MAX PROFIT", _fmt_money(max_p), C_BB_GREEN))
+
+        # MAX LOSS is always red.
         self.query_one("#m-loss").update(
-            _cell("MAX LOSS",   _fmt_money(max_l)))
+            _cell("MAX LOSS", _fmt_money(max_l), C_BB_RED))
+
+        # BREAKEVEN(S) is a neutral price → white.
+        be_str = "  ".join(f"${b:,.2f}" for b in be) if be else "—"
         self.query_one("#m-be").update(
-            _cell("BREAKEVEN(S)",
-                  "  ".join(f"${b:,.2f}" for b in be) if be else "—"))
+            _cell("BREAKEVEN(S)", be_str, C_BB_WHITE))
 
     def reset(self) -> None:
         """Blank all metric cells to dashes (no active strategy)."""
         def _cell(title: str) -> RichText:
             t = RichText()
-            t.append(f" {title}\n", style=f"{C_AMBER} bold")
-            t.append(" —",          style=f"{C_AMBER} bold")
+            t.append(f" {title}\n", style=f"{C_BB_LABEL} bold")
+            t.append(" —",          style=f"{C_BB_LABEL} bold")
             return t
         for wid, title in (("#m-net",    "NET PREMIUM"),
                            ("#m-profit", "MAX PROFIT"),
@@ -477,11 +489,12 @@ class ChartWidget(Static):
         """Persistent placeholder (dashes) in the info bar when no hover is active."""
         if not self._tooltip_id:
             return
+        label_style = f"{C_BB_LABEL} bold"
         tt = RichText()
-        tt.append("  Hover over chart   ", style=f"{C_AMBER} bold")
-        tt.append("Spot: ", style=f"{C_AMBER} bold"); tt.append("—", style=f"{C_AMBER} bold")
-        tt.append("   P/L: ", style=f"{C_AMBER} bold"); tt.append("—", style=f"{C_AMBER} bold")
-        tt.append("   Move: ", style=f"{C_AMBER} bold"); tt.append("—", style=f"{C_AMBER} bold")
+        tt.append("  Hover over chart   ", style=label_style)
+        tt.append("Spot: ", style=label_style);   tt.append("—", style=label_style)
+        tt.append("   P/L: ", style=label_style); tt.append("—", style=label_style)
+        tt.append("   Move: ", style=label_style);tt.append("—", style=label_style)
         try:
             self.app.query_one(self._tooltip_id, Static).update(tt)
         except Exception:
@@ -528,17 +541,19 @@ class ChartWidget(Static):
             return
 
         tt = RichText()
-        amber_bold = f"{C_AMBER} bold"
-        tt.append("  Hover  ",       style=amber_bold)
-        tt.append("Spot: ",          style=amber_bold)
-        tt.append(f"${spot:,.2f}",   style=amber_bold)
-        tt.append("   P/L: ",        style=amber_bold)
-        tt.append(f"${pnl:,.2f}",    style=amber_bold)
+        label_style = f"{C_BB_LABEL} bold"
+        pnl_color   = C_BB_GREEN if pnl >= 0 else C_BB_RED
+        tt.append("  Hover  ",       style=label_style)
+        tt.append("Spot: ",          style=label_style)
+        tt.append(f"${spot:,.2f}",   style=f"{C_BB_WHITE} bold")
+        tt.append("   P/L: ",        style=label_style)
+        tt.append(f"${pnl:,.2f}",    style=f"{pnl_color} bold")
         if self._current_spot and self._current_spot > 0:
             pct = ((spot - self._current_spot) / self._current_spot) * 100
             sign = "+" if pct >= 0 else ""
-            tt.append("   Move: ",   style=amber_bold)
-            tt.append(f"{sign}{pct:.2f}%", style=amber_bold)
+            move_color = C_BB_GREEN if pct >= 0 else C_BB_RED
+            tt.append("   Move: ",   style=label_style)
+            tt.append(f"{sign}{pct:.2f}%", style=f"{move_color} bold")
         if self._tooltip_id:
             try:
                 self.app.query_one(self._tooltip_id, Static).update(tt)
@@ -974,19 +989,28 @@ class OptionsTUI(App[None]):
     def _update_cost_info(self, summary: dict) -> None:
         """Show net cost (and budget) in the Strategy Builder panel.
 
-        ``net_premium`` already comes back in dollars per-contract (×100) from
-        ``Option.cost``, so no further scaling is needed here.
+        Bloomberg palette: grey labels, white budget value, green/red net cost
+        depending on credit/debit. ``net_premium`` is already per-contract.
         """
         net = summary.get("net_premium", 0.0)
         direction = "DR" if net < 0 else "CR"
+        cost_color = C_BB_RED if net < 0 else C_BB_GREEN
+        label_style = f"{C_BB_LABEL} bold"
         t = RichText()
         if self.budget is not None:
-            t.append(f"  Budget: ${self.budget:,.2f}  |  ", style=C_AMBER)
-        t.append(f"Net Cost: {direction} ${abs(net):,.2f}", style=C_AMBER)
+            t.append("  Budget: ", style=label_style)
+            t.append(f"${self.budget:,.2f}", style=f"{C_BB_WHITE} bold")
+            t.append("  |  ", style=label_style)
+        t.append("Net Cost: ", style=label_style)
+        t.append(f"{direction} ${abs(net):,.2f}", style=f"{cost_color} bold")
         self.query_one("#live-cost-info", Static).update(t)
 
     def _update_target_info(self, strategy: Strategy) -> None:
-        """Compute and display Profit @ Target and Move Required (all amber)."""
+        """Compute and display Profit @ Target and Move Required.
+
+        Bloomberg palette: grey labels, the target P&L always rendered in
+        gold so it stands out as the key metric, % move green/red on sign.
+        """
         try:
             wid = self.query_one("#live-target-info", Static)
         except Exception:
@@ -996,15 +1020,17 @@ class OptionsTUI(App[None]):
             return
         pnl  = strategy.realized_payoff(self.target_price)
         spot = self._live_spot or 0.0
-        amber_bold = f"{C_AMBER} bold"
+        label_style = f"{C_BB_LABEL} bold"
         t = RichText()
-        t.append(f"  Profit @ Target Price (${self.target_price:,.2f}): ", style=amber_bold)
-        t.append(_fmt_money(pnl), style=amber_bold)
+        t.append(f"  Profit @ Target Price (${self.target_price:,.2f}): ",
+                 style=label_style)
+        t.append(_fmt_money(pnl), style=f"{C_BB_GOLD} bold")
         if spot > 0:
             pct  = ((self.target_price - spot) / spot) * 100
             sign = "+" if pct >= 0 else ""
-            t.append("   Move Required: ", style=amber_bold)
-            t.append(f"{sign}{pct:.2f}%", style=amber_bold)
+            move_color = C_BB_GREEN if pct >= 0 else C_BB_RED
+            t.append("   Move Required: ", style=label_style)
+            t.append(f"{sign}{pct:.2f}%", style=f"{move_color} bold")
         wid.update(t)
 
     # ── Reset confirmation ───────────────────────────────────────────────────
