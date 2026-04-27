@@ -30,7 +30,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 _DISCLAIMER = (
     "Built with the option_payoff framework. "
-    "Prices shown are per-share (\u00d7100 for one standard contract). "
+    "Dollar amounts are per-contract (one US equity option contract = 100 shares). "
     "For educational purposes only \u2014 not financial advice."
 )
 

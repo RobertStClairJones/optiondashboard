@@ -479,7 +479,14 @@ Button#live-remove-btn:hover {
     height: 1;
     padding: 0 1;
     background: #0d0500;
-    color: #00E5FF;
+    color: #FF8C00;
+    text-style: bold;
+}
+
+.target-info {
+    height: 1;
+    padding: 0 1;
+    color: #FF8C00;
     text-style: bold;
 }
 

@@ -55,8 +55,13 @@ class Option:
             self.label = f"{pos}{qty} {opt} K={self.strike:.2f}"
 
     # ------------------------------------------------------------------
+    # All cash-flow / P&L results are reported per-contract: each US equity
+    # option contract represents 100 shares, so we apply a fixed ×100
+    # multiplier here. Quantity is the number of contracts.
+    _SHARES_PER_CONTRACT = 100
+
     def payoff_at_expiry(self, spot_prices: np.ndarray) -> np.ndarray:
-        """P&L at expiry for each element of *spot_prices*."""
+        """P&L at expiry for each element of *spot_prices* (per-contract dollars)."""
         spot = np.asarray(spot_prices, dtype=float)
         if self.option_type == "call":
             intrinsic = np.maximum(spot - self.strike, 0.0)
@@ -64,12 +69,13 @@ class Option:
             intrinsic = np.maximum(self.strike - spot, 0.0)
 
         if self.position == "long":
-            return (intrinsic - self.premium) * self.quantity
+            per_share = intrinsic - self.premium
         else:
-            return (self.premium - intrinsic) * self.quantity
+            per_share = self.premium - intrinsic
+        return per_share * self.quantity * self._SHARES_PER_CONTRACT
 
     def realized_payoff(self, actual_spot: float) -> float:
-        """P&L for a single known spot price at maturity."""
+        """P&L for a single known spot price at maturity (per-contract dollars)."""
         return float(self.payoff_at_expiry(np.array([actual_spot]))[0])
 
     def days_to_expiry(self, reference_date: date | None = None) -> int:
@@ -78,11 +84,11 @@ class Option:
 
     def cost(self) -> float:
         """
-        Net cash flow of this leg.
+        Net cash flow of this leg in dollars (per-contract, ×100 shares).
         Negative = debit (long), positive = credit (short).
         """
         sign = -1 if self.position == "long" else 1
-        return sign * self.premium * self.quantity
+        return sign * self.premium * self.quantity * self._SHARES_PER_CONTRACT
 
 
 @dataclass

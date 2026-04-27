@@ -107,22 +107,29 @@ def _fmt_money(v: float, inf_str: str = "Unlimited") -> str:
 
 # ── Analytical max-profit / max-loss ──────────────────────────────────────────
 
+_SHARES_PER_CONTRACT = 100   # mirrors core.engine.Option._SHARES_PER_CONTRACT
+
+
 def _analytical_max_profit_loss(legs: list[dict]) -> tuple[float | None, float | None]:
     """
     Return (max_profit, max_loss) analytically for recognised strategy types.
-    Values are per-share (matching core.py payoff_at_expiry convention).
-    float('inf') / float('-inf') = unlimited.
+    Values are in **dollars per-contract** — option-leg results are multiplied
+    by 100 (one US equity option contract = 100 shares). Stock legs use their
+    raw share quantity. float('inf') / float('-inf') = unlimited.
     Returns (None, None) to signal caller should keep the numeric-scan result.
     """
+    M = _SHARES_PER_CONTRACT  # apply to every option-leg result below
     opts   = [L for L in legs if L.get("type") in ("call", "put")]
     stocks = [L for L in legs if L.get("type") in ("stock", "stock (underlying)")]
 
     def _nc() -> float:
-        """Net credit of all legs (+ve = receive premium, -ve = pay)."""
+        """Net credit of all option legs in dollars (per-contract, ×100)."""
         t = 0.0
         for L in legs:
+            if L.get("type") not in ("call", "put"):
+                continue
             p, q = float(L.get("prem", 0.0)), int(L.get("qty", 1))
-            t += p * q if L.get("pos") == "short" else -p * q
+            t += (p * q if L.get("pos") == "short" else -p * q) * M
         return t
 
     # ── Single option ────────────────────────────────────────────────────────
@@ -130,10 +137,10 @@ def _analytical_max_profit_loss(legs: list[dict]) -> tuple[float | None, float |
         L = opts[0]
         K, p, q, pos, ot = (float(L["K"]), float(L.get("prem", 0.0)),
                              int(L.get("qty", 1)), L["pos"], L["type"])
-        if   ot == "call" and pos == "long":  return float("inf"),       -p * q
-        elif ot == "call" and pos == "short": return  p * q,              float("-inf")
-        elif ot == "put"  and pos == "long":  return (K - p) * q,        -p * q
-        elif ot == "put"  and pos == "short": return  p * q,             -(K - p) * q
+        if   ot == "call" and pos == "long":  return float("inf"),       -p * q * M
+        elif ot == "call" and pos == "short": return  p * q * M,          float("-inf")
+        elif ot == "put"  and pos == "long":  return (K - p) * q * M,    -p * q * M
+        elif ot == "put"  and pos == "short": return  p * q * M,        -(K - p) * q * M
 
     # ── 2-leg, options only ──────────────────────────────────────────────────
     if len(legs) == 2 and len(opts) == 2 and not stocks:
@@ -144,26 +151,26 @@ def _analytical_max_profit_loss(legs: list[dict]) -> tuple[float | None, float |
             lo, hi = c_legs;  q = int(lo.get("qty", 1))
             if lo["pos"] == "long"  and hi["pos"] == "short":   # bull call spread
                 nd = float(lo["prem"]) - float(hi["prem"])
-                return (float(hi["K"]) - float(lo["K"]) - nd) * q, -nd * q
+                return (float(hi["K"]) - float(lo["K"]) - nd) * q * M, -nd * q * M
             if lo["pos"] == "short" and hi["pos"] == "long":    # bear call spread
                 nc_v = float(lo["prem"]) - float(hi["prem"])
-                return nc_v * q, -(float(hi["K"]) - float(lo["K"]) - nc_v) * q
+                return nc_v * q * M, -(float(hi["K"]) - float(lo["K"]) - nc_v) * q * M
 
         if len(p_legs) == 2:                               # both puts
             lo, hi = p_legs;  q = int(lo.get("qty", 1))
             if hi["pos"] == "long"  and lo["pos"] == "short":   # bear put spread
                 nd = float(hi["prem"]) - float(lo["prem"])
-                return (float(hi["K"]) - float(lo["K"]) - nd) * q, -nd * q
+                return (float(hi["K"]) - float(lo["K"]) - nd) * q * M, -nd * q * M
             if hi["pos"] == "short" and lo["pos"] == "long":    # bull put spread
                 nc_v = float(hi["prem"]) - float(lo["prem"])
-                return nc_v * q, -(float(hi["K"]) - float(lo["K"]) - nc_v) * q
+                return nc_v * q * M, -(float(hi["K"]) - float(lo["K"]) - nc_v) * q * M
 
         if len(c_legs) == 1 and len(p_legs) == 1:         # call + put
             c, p = c_legs[0], p_legs[0];  q = int(c.get("qty", 1))
             if c["pos"] == "long"  and p["pos"] == "long":   # long straddle/strangle
-                return float("inf"), -(float(c["prem"]) + float(p["prem"])) * q
+                return float("inf"), -(float(c["prem"]) + float(p["prem"])) * q * M
             if c["pos"] == "short" and p["pos"] == "short":  # short straddle/strangle
-                return (float(c["prem"]) + float(p["prem"])) * q, float("-inf")
+                return (float(c["prem"]) + float(p["prem"])) * q * M, float("-inf")
 
     # ── 3-leg butterfly ──────────────────────────────────────────────────────
     if len(legs) == 3 and len(opts) == 3 and not stocks:
@@ -171,8 +178,8 @@ def _analytical_max_profit_loss(legs: list[dict]) -> tuple[float | None, float |
         q = int(lo.get("qty", 1))
         if (lo["pos"] == "long" and mid["pos"] == "short"
                 and int(mid.get("qty", 1)) == 2 and hi["pos"] == "long"):
-            nd = _nc()   # nd is negative (net debit)
-            return (float(mid["K"]) - float(lo["K"]) + nd) * q, nd * q
+            nd = _nc()   # already in dollars (×100)
+            return (float(mid["K"]) - float(lo["K"])) * q * M + nd, nd
 
     # ── 4-leg iron condor ────────────────────────────────────────────────────
     if len(legs) == 4 and len(opts) == 4 and not stocks:
@@ -182,19 +189,22 @@ def _analytical_max_profit_loss(legs: list[dict]) -> tuple[float | None, float |
             p_lo, p_hi = p_s;  c_lo, c_hi = c_s
             if (p_lo["pos"] == "long"  and p_hi["pos"] == "short" and
                 c_lo["pos"] == "short" and c_hi["pos"] == "long"):
-                nc_v   = _nc()
+                nc_v   = _nc()   # dollars (×100)
                 put_w  = float(p_hi["K"]) - float(p_lo["K"])
                 call_w = float(c_hi["K"]) - float(c_lo["K"])
-                return nc_v, -(max(put_w, call_w) - nc_v)
+                return nc_v, -(max(put_w, call_w) * M - nc_v)
 
     # ── Covered call ─────────────────────────────────────────────────────────
+    # Stock leg uses share quantity (not contract quantity), but it pairs with
+    # one option contract worth 100 shares — so we scale the option premium and
+    # its strike-vs-entry differential by ×100 to match.
     if len(legs) == 2 and len(opts) == 1 and len(stocks) == 1:
         c_l = [L for L in opts if L["type"] == "call" and L["pos"] == "short"]
         if c_l and stocks[0]["pos"] == "long":
             c, s = c_l[0], stocks[0]
             q = int(c.get("qty", 1))
-            return ((float(c["K"]) - float(s["K"]) + float(c.get("prem", 0))) * q,
-                    -(float(s["K"]) - float(c.get("prem", 0))) * q)
+            return ((float(c["K"]) - float(s["K"]) + float(c.get("prem", 0))) * q * M,
+                    -(float(s["K"]) - float(c.get("prem", 0))) * q * M)
 
     # ── Protective put ───────────────────────────────────────────────────────
     if len(legs) == 2 and len(opts) == 1 and len(stocks) == 1:
@@ -203,7 +213,7 @@ def _analytical_max_profit_loss(legs: list[dict]) -> tuple[float | None, float |
             p, s = p_l[0], stocks[0]
             q = int(p.get("qty", 1))
             return (float("inf"),
-                    -(float(s["K"]) - float(p["K"]) + float(p.get("prem", 0))) * q)
+                    -(float(s["K"]) - float(p["K"]) + float(p.get("prem", 0))) * q * M)
 
     return None, None   # unrecognised — caller keeps numeric-scan result
 
@@ -399,33 +409,31 @@ class MetricsBar(Horizontal):
         max_l = summary.get("max_loss",    0.0)
         be    = summary.get("breakeven_points", [])
 
-        def _cell(title: str, value: str, val_style: str) -> RichText:
+        def _cell(title: str, value: str) -> RichText:
+            # Both label and value rendered in bright amber for a uniform stat
+            # block — no dim brown labels, no green/red value coding.
             t = RichText()
-            t.append(f" {title}\n", style=f"{C_DIM} bold")
-            t.append(f" {value}",   style=f"{val_style} bold")
+            t.append(f" {title}\n", style=f"{C_AMBER} bold")
+            t.append(f" {value}",   style=f"{C_AMBER} bold")
             return t
 
         self.query_one("#m-net").update(
             _cell("NET PREMIUM",
-                  f"{'CR' if net >= 0 else 'DR'} ${abs(net):,.2f}",
-                  C_GREEN if net >= 0 else C_RED))
+                  f"{'CR' if net >= 0 else 'DR'} ${abs(net):,.2f}"))
         self.query_one("#m-profit").update(
-            _cell("MAX PROFIT", _fmt_money(max_p),
-                  C_GREEN if max_p > 0 else C_AMBER))
+            _cell("MAX PROFIT", _fmt_money(max_p)))
         self.query_one("#m-loss").update(
-            _cell("MAX LOSS",   _fmt_money(max_l),
-                  C_RED   if max_l < 0 else C_AMBER))
+            _cell("MAX LOSS",   _fmt_money(max_l)))
         self.query_one("#m-be").update(
             _cell("BREAKEVEN(S)",
-                  "  ".join(f"${b:,.2f}" for b in be) if be else "—",
-                  C_YELLOW))
+                  "  ".join(f"${b:,.2f}" for b in be) if be else "—"))
 
     def reset(self) -> None:
         """Blank all metric cells to dashes (no active strategy)."""
         def _cell(title: str) -> RichText:
             t = RichText()
-            t.append(f" {title}\n", style=f"{C_DIM} bold")
-            t.append(" —",          style=f"{C_DIM} bold")
+            t.append(f" {title}\n", style=f"{C_AMBER} bold")
+            t.append(" —",          style=f"{C_AMBER} bold")
             return t
         for wid, title in (("#m-net",    "NET PREMIUM"),
                            ("#m-profit", "MAX PROFIT"),
@@ -470,10 +478,10 @@ class ChartWidget(Static):
         if not self._tooltip_id:
             return
         tt = RichText()
-        tt.append("  Hover over chart   ", style=f"{C_DIM} bold")
-        tt.append("Spot: ", style=C_DIM);   tt.append("—",     style=C_CYAN)
-        tt.append("   P/L: ", style=C_DIM); tt.append("—",     style=C_AMBER)
-        tt.append("   Move: ", style=C_DIM);tt.append("—",     style=C_AMBER)
+        tt.append("  Hover over chart   ", style=f"{C_AMBER} bold")
+        tt.append("Spot: ", style=f"{C_AMBER} bold"); tt.append("—", style=f"{C_AMBER} bold")
+        tt.append("   P/L: ", style=f"{C_AMBER} bold"); tt.append("—", style=f"{C_AMBER} bold")
+        tt.append("   Move: ", style=f"{C_AMBER} bold"); tt.append("—", style=f"{C_AMBER} bold")
         try:
             self.app.query_one(self._tooltip_id, Static).update(tt)
         except Exception:
@@ -520,16 +528,17 @@ class ChartWidget(Static):
             return
 
         tt = RichText()
-        tt.append("  Hover  ", style=f"{C_DIM} bold")
-        tt.append(f"Spot: ", style=C_DIM)
-        tt.append(f"${spot:,.2f}", style=C_CYAN)
-        tt.append("   P/L: ", style=C_DIM)
-        tt.append(f"${pnl:,.2f}", style=C_GREEN if pnl >= 0 else C_RED)
+        amber_bold = f"{C_AMBER} bold"
+        tt.append("  Hover  ",       style=amber_bold)
+        tt.append("Spot: ",          style=amber_bold)
+        tt.append(f"${spot:,.2f}",   style=amber_bold)
+        tt.append("   P/L: ",        style=amber_bold)
+        tt.append(f"${pnl:,.2f}",    style=amber_bold)
         if self._current_spot and self._current_spot > 0:
             pct = ((spot - self._current_spot) / self._current_spot) * 100
             sign = "+" if pct >= 0 else ""
-            tt.append("   Move: ", style=C_DIM)
-            tt.append(f"{sign}{pct:.2f}%", style=C_AMBER)
+            tt.append("   Move: ",   style=amber_bold)
+            tt.append(f"{sign}{pct:.2f}%", style=amber_bold)
         if self._tooltip_id:
             try:
                 self.app.query_one(self._tooltip_id, Static).update(tt)
@@ -804,7 +813,8 @@ _HELP_TEXT = """\
   [bold]Max Profit[/]    Best-case P&L across the full spot range.
   [bold]Max Loss[/]      Worst-case P&L — how much you can lose.
   [bold]Breakeven(s)[/]  Spot price(s) where total P&L = 0.
-  All values are [bold]per share[/] — multiply by 100 for one standard contract.
+  All values are [bold]per contract[/] — one US equity option contract = 100 shares,
+  so the dashboard already multiplies premium × quantity × 100 for you.
 
 [bold #FF8C00]TIPS[/]
   • Press [bold #FFE000]Ctrl+R[/] after resizing the window to redraw the chart at the new size.
@@ -962,18 +972,21 @@ class OptionsTUI(App[None]):
         self._update_target_info(strategy)
 
     def _update_cost_info(self, summary: dict) -> None:
-        """Show net cost per contract (and budget) in the Live Data panel."""
-        net    = summary.get("net_premium", 0.0)
-        cost_c = net * 100  # per standard 100-share contract
-        direction = "DR" if cost_c < 0 else "CR"
+        """Show net cost (and budget) in the Strategy Builder panel.
+
+        ``net_premium`` already comes back in dollars per-contract (×100) from
+        ``Option.cost``, so no further scaling is needed here.
+        """
+        net = summary.get("net_premium", 0.0)
+        direction = "DR" if net < 0 else "CR"
         t = RichText()
         if self.budget is not None:
             t.append(f"  Budget: ${self.budget:,.2f}  |  ", style=C_AMBER)
-        t.append(f"Net Cost/contract: {direction} ${abs(cost_c):,.2f}", style=C_AMBER)
+        t.append(f"Net Cost: {direction} ${abs(net):,.2f}", style=C_AMBER)
         self.query_one("#live-cost-info", Static).update(t)
 
     def _update_target_info(self, strategy: Strategy) -> None:
-        """Compute and display Profit @ Target and Move Required."""
+        """Compute and display Profit @ Target and Move Required (all amber)."""
         try:
             wid = self.query_one("#live-target-info", Static)
         except Exception:
@@ -983,14 +996,15 @@ class OptionsTUI(App[None]):
             return
         pnl  = strategy.realized_payoff(self.target_price)
         spot = self._live_spot or 0.0
+        amber_bold = f"{C_AMBER} bold"
         t = RichText()
-        t.append(f"  Profit @ Target Price (${self.target_price:,.2f}): ", style=C_DIM)
-        t.append(_fmt_money(pnl), style=C_GREEN if pnl >= 0 else C_RED)
+        t.append(f"  Profit @ Target Price (${self.target_price:,.2f}): ", style=amber_bold)
+        t.append(_fmt_money(pnl), style=amber_bold)
         if spot > 0:
             pct  = ((self.target_price - spot) / spot) * 100
             sign = "+" if pct >= 0 else ""
-            t.append("   Move Required: ", style=C_DIM)
-            t.append(f"{sign}{pct:.2f}%", style=C_CYAN)
+            t.append("   Move Required: ", style=amber_bold)
+            t.append(f"{sign}{pct:.2f}%", style=amber_bold)
         wid.update(t)
 
     # ── Reset confirmation ───────────────────────────────────────────────────
