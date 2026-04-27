@@ -495,9 +495,12 @@ Button#live-remove-btn:hover {
     color: #664400;
 }
 
-/* ── Label ── */
+/* ── Label ──
+   Amber field captions (Ticker, Expiry, Strategy Name, Target Price, Budget,
+   Price Type, Option Type, Direction, Contracts, Strike). Section headers
+   keep their cyan via .section-label and Collapsible titles. */
 Label {
-    color: #00E5FF;
+    color: #FF8C00;
     text-style: bold;
     height: 1;
 }
