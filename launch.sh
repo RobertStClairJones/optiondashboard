@@ -19,10 +19,12 @@ else
 fi
 
 # ── Build the command to run inside the new window ───────────────────────────
+# We `cd` into the project root and then run `python -m tui` so the `tui`
+# package and its sibling packages (core, utils) all resolve cleanly.
 if [[ -n "$TICKER" ]]; then
-    TUI_CMD="cd \"$SCRIPT_DIR\" && \"$PYTHON\" tui.py --ticker \"$TICKER\" --session-name \"OPTIONS TERMINAL\""
+    TUI_CMD="cd \"$SCRIPT_DIR\" && \"$PYTHON\" -m tui --ticker \"$TICKER\" --session-name \"OPTIONS TERMINAL\""
 else
-    TUI_CMD="cd \"$SCRIPT_DIR\" && \"$PYTHON\" tui.py --session-name \"OPTIONS TERMINAL\""
+    TUI_CMD="cd \"$SCRIPT_DIR\" && \"$PYTHON\" -m tui --session-name \"OPTIONS TERMINAL\""
 fi
 
 # ── AppleScript: open Terminal.app with the OptionsTerminal profile if installed

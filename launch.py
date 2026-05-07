@@ -2,7 +2,7 @@
 """
 launch.py
 ---------
-Spawns a new terminal window running tui.py as an independent process.
+Spawns a new terminal window running the `tui` package as an independent process.
 
 Usage:
     python launch.py                                    # blank TUI
@@ -19,13 +19,12 @@ import sys
 from pathlib import Path
 
 HERE   = Path(__file__).parent
-TUI    = HERE / "tui.py"
 PYTHON = sys.executable
 
 
 def _build_tui_args(ticker: str = "", session_name: str = "") -> list[str]:
-    """Return the argv list for tui.py with optional flags."""
-    cmd: list[str] = [PYTHON, str(TUI)]
+    """Return the argv list for `python -m tui` with optional flags."""
+    cmd: list[str] = [PYTHON, "-m", "tui"]
     if ticker:
         cmd += ["--ticker", ticker]
     if session_name:

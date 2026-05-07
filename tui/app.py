@@ -1,37 +1,33 @@
 """
-tui.py
+app.py
 ------
-Bloomberg-style terminal dashboard for option payoff analysis.
-Run with: python tui.py
+``OptionsTUI`` application shell — top-level event handlers, keybindings,
+and helper functions that bridge the UI to ``core`` and ``utils``.
 
-Imports from:
-  core/engine.py      – Option, StockPosition, Strategy
-  core/market_data.py – get_spot_price, get_available_expiries, get_options_chain
-  utils/export_pdf.py – export_pdf
+Imports from sibling modules:
+  tui.widgets   – MetricsBar, ChartWidget, ToastContainer, ConfirmModal
+  tui.tabs      – LiveDataTab, SavedTab, BacktestingTab, HelpTab
+  tui.analytics – _fmt_money, _analytical_max_profit_loss
+  tui.constants – colour palette
 """
 from __future__ import annotations
 
-import argparse
 import json
-import os
 import subprocess
 import sys
-from datetime import date, datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
-
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 # ── Textual ─────────────────────────────────────────────────────────────────
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.reactive import reactive
-from textual.screen import ModalScreen
 from textual.widgets import (
-    Button, Collapsible, DataTable, Footer, Header, Input,
-    Label, Rule, Select, Static, TabbedContent, TabPane,
+    Button, DataTable, Footer, Header, Input,
+    Select, Static, TabbedContent, TabPane,
 )
 from textual import on, work
 from rich.text import Text as RichText
@@ -40,10 +36,23 @@ from rich.text import Text as RichText
 from core import Option, StockPosition, Strategy
 from utils.export_pdf import export_pdf
 
+# ── Sibling modules ──────────────────────────────────────────────────────────
+from tui.analytics import _fmt_money, _analytical_max_profit_loss
+from tui.constants import (
+    C_AMBER, C_GREEN, C_RED, C_CYAN, C_YELLOW, C_DIM,
+    C_BB_LABEL, C_BB_WHITE, C_BB_GREEN, C_BB_RED, C_BB_GOLD,
+)
+from tui.tabs import LiveDataTab, SavedTab, BacktestingTab, HelpTab
+from tui.widgets import (
+    ChartWidget, ConfirmModal, MetricsBar, ToastContainer,
+)
+
 # ── Paths ────────────────────────────────────────────────────────────────────
-SAVED_CHARTS_DIR = Path(__file__).parent / "data" / "saved_charts"
+# tui/app.py → parent = tui/, parent.parent = project root
+_PROJECT_ROOT    = Path(__file__).resolve().parent.parent
+SAVED_CHARTS_DIR = _PROJECT_ROOT / "data" / "saved_charts"
 SAVED_CHARTS_DIR.mkdir(parents=True, exist_ok=True)
-SAVED_PDFS_DIR = Path(__file__).parent / "data" / "saved_pdfs"
+SAVED_PDFS_DIR   = _PROJECT_ROOT / "data" / "saved_pdfs"
 SAVED_PDFS_DIR.mkdir(parents=True, exist_ok=True)
 
 # ── Presets (mirrored from dashboard.py) ─────────────────────────────────────
@@ -96,165 +105,6 @@ PRESETS: dict[str, list[dict] | None] = {
     ],
 }
 
-# ── Monetary formatter ────────────────────────────────────────────────────────
-
-def _fmt_money(v: float, inf_str: str = "Unlimited") -> str:
-    """Format a P&L value as $X,XXX.XX; handle ±inf gracefully."""
-    if v == float("inf"):   return inf_str
-    if v == float("-inf"):  return f"-{inf_str}"
-    return f"${v:,.2f}"
-
-
-# ── Analytical max-profit / max-loss ──────────────────────────────────────────
-
-_SHARES_PER_CONTRACT = 100   # mirrors core.engine.Option._SHARES_PER_CONTRACT
-
-
-def _analytical_max_profit_loss(legs: list[dict]) -> tuple[float | None, float | None]:
-    """
-    Return (max_profit, max_loss) analytically for recognised strategy types.
-    Values are in **dollars per-contract** — option-leg results are multiplied
-    by 100 (one US equity option contract = 100 shares). Stock legs use their
-    raw share quantity. float('inf') / float('-inf') = unlimited.
-    Returns (None, None) to signal caller should keep the numeric-scan result.
-    """
-    M = _SHARES_PER_CONTRACT  # apply to every option-leg result below
-    opts   = [L for L in legs if L.get("type") in ("call", "put")]
-    stocks = [L for L in legs if L.get("type") in ("stock", "stock (underlying)")]
-
-    def _nc() -> float:
-        """Net credit of all option legs in dollars (per-contract, ×100)."""
-        t = 0.0
-        for L in legs:
-            if L.get("type") not in ("call", "put"):
-                continue
-            p, q = float(L.get("prem", 0.0)), int(L.get("qty", 1))
-            t += (p * q if L.get("pos") == "short" else -p * q) * M
-        return t
-
-    # ── Single option ────────────────────────────────────────────────────────
-    if len(legs) == 1 and len(opts) == 1:
-        L = opts[0]
-        K, p, q, pos, ot = (float(L["K"]), float(L.get("prem", 0.0)),
-                             int(L.get("qty", 1)), L["pos"], L["type"])
-        if   ot == "call" and pos == "long":  return float("inf"),       -p * q * M
-        elif ot == "call" and pos == "short": return  p * q * M,          float("-inf")
-        elif ot == "put"  and pos == "long":  return (K - p) * q * M,    -p * q * M
-        elif ot == "put"  and pos == "short": return  p * q * M,        -(K - p) * q * M
-
-    # ── 2-leg, options only ──────────────────────────────────────────────────
-    if len(legs) == 2 and len(opts) == 2 and not stocks:
-        c_legs = sorted([L for L in opts if L["type"] == "call"], key=lambda L: float(L["K"]))
-        p_legs = sorted([L for L in opts if L["type"] == "put"],  key=lambda L: float(L["K"]))
-
-        if len(c_legs) == 2:                               # both calls
-            lo, hi = c_legs;  q = int(lo.get("qty", 1))
-            if lo["pos"] == "long"  and hi["pos"] == "short":   # bull call spread
-                nd = float(lo["prem"]) - float(hi["prem"])
-                return (float(hi["K"]) - float(lo["K"]) - nd) * q * M, -nd * q * M
-            if lo["pos"] == "short" and hi["pos"] == "long":    # bear call spread
-                nc_v = float(lo["prem"]) - float(hi["prem"])
-                return nc_v * q * M, -(float(hi["K"]) - float(lo["K"]) - nc_v) * q * M
-
-        if len(p_legs) == 2:                               # both puts
-            lo, hi = p_legs;  q = int(lo.get("qty", 1))
-            if hi["pos"] == "long"  and lo["pos"] == "short":   # bear put spread
-                nd = float(hi["prem"]) - float(lo["prem"])
-                return (float(hi["K"]) - float(lo["K"]) - nd) * q * M, -nd * q * M
-            if hi["pos"] == "short" and lo["pos"] == "long":    # bull put spread
-                nc_v = float(hi["prem"]) - float(lo["prem"])
-                return nc_v * q * M, -(float(hi["K"]) - float(lo["K"]) - nc_v) * q * M
-
-        if len(c_legs) == 1 and len(p_legs) == 1:         # call + put
-            c, p = c_legs[0], p_legs[0];  q = int(c.get("qty", 1))
-            if c["pos"] == "long"  and p["pos"] == "long":   # long straddle/strangle
-                return float("inf"), -(float(c["prem"]) + float(p["prem"])) * q * M
-            if c["pos"] == "short" and p["pos"] == "short":  # short straddle/strangle
-                return (float(c["prem"]) + float(p["prem"])) * q * M, float("-inf")
-
-    # ── 3-leg butterfly ──────────────────────────────────────────────────────
-    if len(legs) == 3 and len(opts) == 3 and not stocks:
-        lo, mid, hi = sorted(opts, key=lambda L: float(L["K"]))
-        q = int(lo.get("qty", 1))
-        if (lo["pos"] == "long" and mid["pos"] == "short"
-                and int(mid.get("qty", 1)) == 2 and hi["pos"] == "long"):
-            nd = _nc()   # already in dollars (×100)
-            return (float(mid["K"]) - float(lo["K"])) * q * M + nd, nd
-
-    # ── 4-leg iron condor ────────────────────────────────────────────────────
-    if len(legs) == 4 and len(opts) == 4 and not stocks:
-        c_s = sorted([L for L in opts if L["type"] == "call"], key=lambda L: float(L["K"]))
-        p_s = sorted([L for L in opts if L["type"] == "put"],  key=lambda L: float(L["K"]))
-        if len(c_s) == 2 and len(p_s) == 2:
-            p_lo, p_hi = p_s;  c_lo, c_hi = c_s
-            if (p_lo["pos"] == "long"  and p_hi["pos"] == "short" and
-                c_lo["pos"] == "short" and c_hi["pos"] == "long"):
-                nc_v   = _nc()   # dollars (×100)
-                put_w  = float(p_hi["K"]) - float(p_lo["K"])
-                call_w = float(c_hi["K"]) - float(c_lo["K"])
-                return nc_v, -(max(put_w, call_w) * M - nc_v)
-
-    # ── Covered call ─────────────────────────────────────────────────────────
-    # Stock leg uses share quantity (not contract quantity), but it pairs with
-    # one option contract worth 100 shares — so we scale the option premium and
-    # its strike-vs-entry differential by ×100 to match.
-    if len(legs) == 2 and len(opts) == 1 and len(stocks) == 1:
-        c_l = [L for L in opts if L["type"] == "call" and L["pos"] == "short"]
-        if c_l and stocks[0]["pos"] == "long":
-            c, s = c_l[0], stocks[0]
-            q = int(c.get("qty", 1))
-            return ((float(c["K"]) - float(s["K"]) + float(c.get("prem", 0))) * q * M,
-                    -(float(s["K"]) - float(c.get("prem", 0))) * q * M)
-
-    # ── Protective put ───────────────────────────────────────────────────────
-    if len(legs) == 2 and len(opts) == 1 and len(stocks) == 1:
-        p_l = [L for L in opts if L["type"] == "put" and L["pos"] == "long"]
-        if p_l and stocks[0]["pos"] == "long":
-            p, s = p_l[0], stocks[0]
-            q = int(p.get("qty", 1))
-            return (float("inf"),
-                    -(float(s["K"]) - float(p["K"]) + float(p.get("prem", 0))) * q * M)
-
-    return None, None   # unrecognised — caller keeps numeric-scan result
-
-
-def _is_multi_directional(legs: list[dict]) -> bool:
-    """
-    Return True if the strategy can profit from the underlying moving in either
-    direction (straddle, strangle, butterfly, condor, iron condor).
-    """
-    opts = [L for L in legs if L.get("type") in ("call", "put")]
-    long_calls = [L for L in opts if L["type"] == "call" and L["pos"] == "long"]
-    long_puts  = [L for L in opts if L["type"] == "put"  and L["pos"] == "long"]
-    # Long straddle / strangle: long call + long put
-    if long_calls and long_puts:
-        return True
-    # Butterfly (3 options): long–short–long
-    if len(opts) == 3:
-        s = sorted(opts, key=lambda L: float(L["K"]))
-        if s[0]["pos"] == "long" and s[1]["pos"] == "short" and s[2]["pos"] == "long":
-            return True
-    # Condor / iron condor (4 options)
-    if len(opts) == 4:
-        return True
-    return False
-
-
-# ── Bloomberg colour palette ──────────────────────────────────────────────────
-C_AMBER  = "#FF8C00"
-C_GREEN  = "#00FF41"
-C_RED    = "#FF3333"
-C_CYAN   = "#00E5FF"
-C_YELLOW = "#FFE000"
-C_DIM    = "#664400"
-
-# ── Bloomberg-style stat-bar palette ─────────────────────────────────────────
-C_BB_LABEL = "#AAAAAA"   # dim light grey labels
-C_BB_WHITE = "#FFFFFF"   # neutral values (spot, breakeven, budget)
-C_BB_GREEN = "#39FF14"   # positive values + "Unlimited"
-C_BB_RED   = "#FF3333"   # negative values
-C_BB_GOLD  = "#FFD700"   # profit @ target price (always stands out)
-
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Helper functions – call into existing project modules
@@ -282,85 +132,6 @@ def _build_strategy(name: str, legs: list[dict]) -> Strategy:
             s.add_leg(Option(leg_type, pos, K, prem, exp, qty,
                              label=f"{ps} {qs}{tk}{ts} K={K:.0f}"))
     return s
-
-
-def _render_chart(strategy: Strategy, width: int, height: int,
-                  hover_x: float | None = None,
-                  current_spot: float | None = None) -> RichText:
-    """
-    Render ASCII payoff diagram.
-    Uses plotext for rendering; falls back to a plain-text note on error.
-    Optional hover_x draws a cyan vertical crosshair at that spot price.
-    Marks each leg, the current spot, and labels each breakeven price.
-    """
-    try:
-        import plotext as plt
-
-        chart_w = max(width - 4, 20)
-        chart_h = max(height - 2, 8)
-
-        plt.clf()
-        plt.plotsize(chart_w, chart_h)
-        plt.canvas_color("black")
-        plt.axes_color("black")
-        plt.ticks_color("orange")
-
-        # Higher-density sample = visually smoother polyline.
-        spot_range = strategy._auto_spot_range(n=min(chart_w * 6, 1200))
-        total_pnl  = strategy.payoff_at_expiry(spot_range)
-        spots      = spot_range.tolist()
-        pnls       = total_pnl.tolist()
-
-        above = [v if v >= 0 else float("nan") for v in pnls]
-        below = [v if v <  0 else float("nan") for v in pnls]
-
-        # Per-leg payoff curves (thin amber dashes underneath the total).
-        if len(strategy.legs) > 1:
-            for leg in strategy.legs:
-                try:
-                    leg_pnl = leg.payoff_at_expiry(spot_range).tolist()
-                    plt.plot(spots, leg_pnl, color="orange+",
-                             marker="braille", label=getattr(leg, "label", "leg"))
-                except Exception:
-                    pass
-
-        # Total P&L: the prominent line. Braille marker = highest density.
-        plt.plot(spots, pnls, color="orange", marker="braille", label="P&L")
-        if any(v == v for v in above):
-            plt.plot(spots, above, color="green", marker="braille", label="Profit")
-        if any(v == v for v in below):
-            plt.plot(spots, below, color="red", marker="braille", label="Loss")
-
-        plt.hline(0, color=239)
-        for be in strategy.breakeven_points(spot_range):
-            plt.vline(be, color="yellow")
-            try:
-                plt.text(f"BE ${be:.2f}", x=be, y=0,
-                         color="yellow", background="black", alignment="center")
-            except Exception:
-                pass
-
-        # Current spot — distinct cyan/white marker line.
-        if current_spot is not None and current_spot > 0:
-            plt.vline(current_spot, color="cyan")
-            try:
-                plt.text(f"Spot ${current_spot:.2f}",
-                         x=current_spot, y=max(pnls),
-                         color="cyan", background="black", alignment="center")
-            except Exception:
-                pass
-
-        if hover_x is not None:
-            plt.vline(hover_x, color="cyan+")
-
-        plt.xlabel("Spot Price at Expiry")
-        plt.ylabel("P/L")
-        plt.title(f" {strategy.name} ")
-
-        return RichText.from_ansi(plt.build())
-
-    except Exception as exc:
-        return RichText(f" [chart error: {exc}]", style=C_AMBER)
 
 
 def _load_saved_charts() -> list[dict]:
@@ -396,471 +167,14 @@ def _save_chart_file(strategy: Strategy, legs: list[dict],
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Custom widgets
-# ═══════════════════════════════════════════════════════════════════════════════
-
-class MetricsBar(Horizontal):
-    """Four metric cells: Net Premium · Max Profit · Max Loss · Breakevens."""
-
-    DEFAULT_CSS = "MetricsBar { height: 5; }"
-
-    def compose(self) -> ComposeResult:
-        yield Static("", id="m-net",    classes="metric-box")
-        yield Static("", id="m-profit", classes="metric-box")
-        yield Static("", id="m-loss",   classes="metric-box")
-        yield Static("", id="m-be",     classes="metric-box")
-
-    def update_metrics(self, summary: dict) -> None:
-        net   = summary.get("net_premium", 0.0)
-        max_p = summary.get("max_profit",  0.0)
-        max_l = summary.get("max_loss",    0.0)
-        be    = summary.get("breakeven_points", [])
-
-        def _cell(title: str, value: str, val_color: str) -> RichText:
-            t = RichText()
-            t.append(f" {title}\n", style=f"{C_BB_LABEL} bold")
-            t.append(f" {value}",   style=f"{val_color} bold")
-            return t
-
-        # NET PREMIUM — DR prefix + amount share the same red/green per sign.
-        net_color = C_BB_GREEN if net >= 0 else C_BB_RED
-        net_str   = f"{'CR' if net >= 0 else 'DR'} ${abs(net):,.2f}"
-        self.query_one("#m-net").update(_cell("NET PREMIUM", net_str, net_color))
-
-        # MAX PROFIT is always green (covers "Unlimited" too).
-        self.query_one("#m-profit").update(
-            _cell("MAX PROFIT", _fmt_money(max_p), C_BB_GREEN))
-
-        # MAX LOSS is always red.
-        self.query_one("#m-loss").update(
-            _cell("MAX LOSS", _fmt_money(max_l), C_BB_RED))
-
-        # BREAKEVEN(S) is a neutral price → white.
-        be_str = "  ".join(f"${b:,.2f}" for b in be) if be else "—"
-        self.query_one("#m-be").update(
-            _cell("BREAKEVEN(S)", be_str, C_BB_WHITE))
-
-    def reset(self) -> None:
-        """Blank all metric cells to dashes (no active strategy)."""
-        def _cell(title: str) -> RichText:
-            t = RichText()
-            t.append(f" {title}\n", style=f"{C_BB_LABEL} bold")
-            t.append(" —",          style=f"{C_BB_LABEL} bold")
-            return t
-        for wid, title in (("#m-net",    "NET PREMIUM"),
-                           ("#m-profit", "MAX PROFIT"),
-                           ("#m-loss",   "MAX LOSS"),
-                           ("#m-be",     "BREAKEVEN(S)")):
-            try: self.query_one(wid).update(_cell(title))
-            except Exception: pass
-
-
-class ChartWidget(Static):
-    """ASCII payoff diagram, rendered via plotext.
-
-    Supports a mouse-hover crosshair: stores the most recent strategy and
-    redraws with a vertical cyan line at the hovered spot price. Also
-    updates a paired tooltip widget (set via `tooltip_id`) showing
-    Spot / P/L / % Move values.
-    """
-
-    DEFAULT_CSS = "ChartWidget { height: 1fr; background: #000000; }"
-
-    # Plotext leaves roughly these many cells for axis labels — approximate.
-    _PAD_LEFT  = 7
-    _PAD_RIGHT = 2
-    _PAD_TOP   = 2
-    _PAD_BOT   = 3
-
-    def __init__(self, *args, tooltip_id: str | None = None, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
-        self._strategy: Strategy | None = None
-        self._spot_min: float = 0.0
-        self._spot_max: float = 0.0
-        self._current_spot: float | None = None
-        self._tooltip_id = tooltip_id
-        self._last_hover_x: float | None = None
-
-    def on_mount(self) -> None:
-        self.update(RichText(" No strategy — add legs on the left.", style=C_AMBER))
-        self._reset_tooltip()
-
-    def _reset_tooltip(self) -> None:
-        """Persistent placeholder (dashes) in the info bar when no hover is active."""
-        if not self._tooltip_id:
-            return
-        label_style = f"{C_BB_LABEL} bold"
-        tt = RichText()
-        tt.append("  Hover over chart   ", style=label_style)
-        tt.append("Spot: ", style=label_style);   tt.append("—", style=label_style)
-        tt.append("   P/L: ", style=label_style); tt.append("—", style=label_style)
-        tt.append("   Move: ", style=label_style);tt.append("—", style=label_style)
-        try:
-            self.app.query_one(self._tooltip_id, Static).update(tt)
-        except Exception:
-            pass
-
-    def refresh_chart(self, strategy: Strategy,
-                      current_spot: float | None = None) -> None:
-        self._strategy = strategy
-        arr = strategy._auto_spot_range()
-        self._spot_min = float(arr[0])
-        self._spot_max = float(arr[-1])
-        self._current_spot = current_spot
-        self._last_hover_x = None
-        w = max(self.size.width  or 80, 20)
-        h = max(self.size.height or 24,  8)
-        self.update(_render_chart(strategy, w, h, current_spot=current_spot))
-        self._reset_tooltip()
-
-    def _mouse_x_to_spot(self, mx: int) -> float | None:
-        w = max(self.size.width or 80, 20)
-        chart_w = max(w - self._PAD_LEFT - self._PAD_RIGHT, 1)
-        x_in = mx - self._PAD_LEFT
-        if x_in < 0 or x_in > chart_w:
-            return None
-        if self._spot_max <= self._spot_min:
-            return None
-        frac = x_in / chart_w
-        return self._spot_min + frac * (self._spot_max - self._spot_min)
-
-    def on_mouse_move(self, event) -> None:
-        if self._strategy is None:
-            return
-        spot = self._mouse_x_to_spot(event.x)
-        if spot is None:
-            return
-        # Skip redraw if the mapped spot didn't change meaningfully.
-        if (self._last_hover_x is not None
-                and abs(spot - self._last_hover_x) < (self._spot_max - self._spot_min) / 400):
-            return
-        self._last_hover_x = spot
-        try:
-            pnl = float(self._strategy.realized_payoff(spot))
-        except Exception:
-            return
-
-        tt = RichText()
-        label_style = f"{C_BB_LABEL} bold"
-        pnl_color   = C_BB_GREEN if pnl >= 0 else C_BB_RED
-        tt.append("  Hover  ",       style=label_style)
-        tt.append("Spot: ",          style=label_style)
-        tt.append(f"${spot:,.2f}",   style=f"{C_BB_WHITE} bold")
-        tt.append("   P/L: ",        style=label_style)
-        tt.append(f"${pnl:,.2f}",    style=f"{pnl_color} bold")
-        if self._current_spot and self._current_spot > 0:
-            pct = ((spot - self._current_spot) / self._current_spot) * 100
-            sign = "+" if pct >= 0 else ""
-            move_color = C_BB_GREEN if pct >= 0 else C_BB_RED
-            tt.append("   Move: ",   style=label_style)
-            tt.append(f"{sign}{pct:.2f}%", style=f"{move_color} bold")
-        if self._tooltip_id:
-            try:
-                self.app.query_one(self._tooltip_id, Static).update(tt)
-            except Exception:
-                pass
-
-        # Redraw chart with crosshair at hovered spot.
-        w = max(self.size.width  or 80, 20)
-        h = max(self.size.height or 24,  8)
-        self.update(_render_chart(self._strategy, w, h,
-                                  hover_x=spot, current_spot=self._current_spot))
-
-    def on_leave(self, event=None) -> None:
-        """Clear crosshair and reset tooltip to placeholder state."""
-        if self._strategy is None:
-            return
-        self._last_hover_x = None
-        self._reset_tooltip()
-        w = max(self.size.width  or 80, 20)
-        h = max(self.size.height or 24,  8)
-        self.update(_render_chart(self._strategy, w, h,
-                                  current_spot=self._current_spot))
-
-
-# ── Panel Widget subclasses (each has its own compose so context managers work)
-
-class ToastContainer(Static):
-    """Bottom-right toast notification overlay. Shows a message for ~2.5s."""
-
-    DEFAULT_CSS = ""
-
-    def on_mount(self) -> None:
-        self.display = False
-
-    def show(self, msg: str, style: str = C_GREEN, duration: float = 2.5) -> None:
-        t = RichText()
-        t.append(f"  ✓  {msg}  ", style=f"{style} bold")
-        self.update(t)
-        self.display = True
-        self.set_timer(duration, self._hide)
-
-    def _hide(self) -> None:
-        self.display = False
-        self.update("")
-
-
-class ConfirmModal(ModalScreen[bool]):
-    """Generic Yes/No confirmation dialog."""
-
-    DEFAULT_CSS = """
-    ConfirmModal {
-        align: center middle;
-    }
-    ConfirmModal > #confirm-box {
-        width: 56;
-        height: 9;
-        background: #0d0500;
-        border: solid #FF4500;
-        padding: 1 2;
-    }
-    ConfirmModal #confirm-msg {
-        height: 3;
-        content-align: center middle;
-        color: #FF8C00;
-        text-style: bold;
-    }
-    ConfirmModal #confirm-actions {
-        height: 3;
-        align: center middle;
-    }
-    ConfirmModal Button {
-        margin: 0 2;
-        min-width: 12;
-    }
-    """
-
-    def __init__(self, message: str) -> None:
-        super().__init__()
-        self._message = message
-
-    def compose(self) -> ComposeResult:
-        with Vertical(id="confirm-box"):
-            yield Static(self._message, id="confirm-msg")
-            with Horizontal(id="confirm-actions"):
-                yield Button("Confirm", id="confirm-yes", variant="primary")
-                yield Button("Cancel", id="confirm-no")
-
-    @on(Button.Pressed, "#confirm-yes")
-    def _yes(self) -> None:
-        self.dismiss(True)
-
-    @on(Button.Pressed, "#confirm-no")
-    def _no(self) -> None:
-        self.dismiss(False)
-
-
-class LiveDataTab(Horizontal):
-    """Strategy Builder — live market data + multi-leg builder."""
-
-    DEFAULT_CSS = "LiveDataTab { height: 1fr; }"
-
-    def compose(self) -> ComposeResult:
-        with VerticalScroll(id="live-form"):
-            yield Button("⟲ RESET ALL", id="live-reset-all", classes="reset-btn")
-
-            with Collapsible(title="DATA SOURCE", collapsed=False, id="sec-data"):
-                yield Label("Ticker")
-                yield Input(placeholder="Ticker (AAPL, SPY…)", id="live-ticker")
-                yield Button("Fetch Expiries", id="btn-fetch", variant="primary")
-                yield Static("", id="live-spot-label")
-                yield Label("Expiry")
-                yield Select([], id="sel-expiry", allow_blank=True)
-                yield Button("Load Chain", id="btn-chain")
-
-            with Collapsible(title="STRATEGY SETUP", collapsed=False, id="sec-setup"):
-                yield Label("Strategy Name")
-                yield Input(placeholder="Strategy name…",
-                            value="Custom Strategy", id="live-inp-name")
-                yield Label("Target Price")
-                yield Input(placeholder="Target Price (e.g. 155.00)", id="live-target")
-                yield Label("Budget")
-                yield Input(placeholder="Max Budget (e.g. 500.00)", id="live-budget")
-                yield Label("Price Type")
-                yield Select([("Bid", "bid"), ("Mid", "mid"), ("Ask", "ask")],
-                             value="mid", id="live-price-src", allow_blank=False)
-                yield Label("Option Type")
-                with Horizontal(classes="toggle-row"):
-                    yield Button("CALL", id="tgl-opt-call",
-                                 classes="toggle-btn -selected")
-                    yield Button("PUT",  id="tgl-opt-put",  classes="toggle-btn")
-                yield Label("Direction")
-                with Horizontal(classes="toggle-row"):
-                    yield Button("LONG",  id="tgl-pos-long",
-                                 classes="toggle-btn -selected")
-                    yield Button("SHORT", id="tgl-pos-short", classes="toggle-btn")
-                yield Label("Contracts")
-                yield Input(placeholder="Quantity", value="1", id="live-qty")
-                yield Label("Strike")
-                yield Static("", id="live-strike-label")
-                yield Select([], id="sel-strike", allow_blank=True)
-
-            with Collapsible(title="LEGS", collapsed=False, id="sec-legs"):
-                yield Button("Add Live Leg", id="btn-live-add", variant="primary")
-                yield Static("", id="live-status")
-                yield DataTable(id="live-legs-table", cursor_type="row")
-                with Horizontal(id="live-legs-actions"):
-                    yield Button("Clear All",  id="live-clear-btn",
-                                 classes="danger-btn")
-                    yield Button("Remove Leg", id="live-remove-btn")
-
-        with Vertical(id="live-right-panel"):
-            # ── Option chain (upper section) ─────────────────────────────
-            with Vertical(id="chain-panel"):
-                yield Label("OPTION CHAIN", classes="section-label")
-                yield Static(
-                    "  IV=Implied Volatility · OI=Open Interest · "
-                    "Vol=Volume Today · Δ=Delta",
-                    id="chain-legend",
-                    classes="chain-legend",
-                )
-                yield DataTable(id="chain-table", cursor_type="row")
-
-            # ── Payoff diagram + metrics (lower section) ─────────────────
-            yield MetricsBar(id="live-metrics-bar")
-            yield Static("", id="live-target-info", classes="target-info")
-            yield Static("", id="live-cost-info",   classes="cost-info")
-            yield Static("", id="live-chart-hover-info", classes="hover-info")
-            yield ChartWidget(id="live-chart-widget",
-                              tooltip_id="#live-chart-hover-info")
-            with Horizontal(id="live-action-row"):
-                yield Button("Save", id="live-save-btn")
-                yield Button("Export PDF", id="live-pdf-btn")
-                yield Static("", id="live-action-status")
-
-
-class SavedTab(Horizontal):
-    """Saved charts browser."""
-
-    DEFAULT_CSS = "SavedTab { height: 1fr; }"
-
-    def compose(self) -> ComposeResult:
-        with VerticalScroll(id="saved-list"):
-            yield Label("SAVED CHARTS", classes="section-label")
-            yield DataTable(id="saved-table", cursor_type="row")
-            yield Button("Delete Selected", id="btn-del-saved")
-            yield Button("Download PDF", id="btn-saved-pdf")
-            yield Label("(or press [P] on selected row)", classes="section-label")
-
-        with Vertical(id="saved-detail"):
-            yield Static("← Select a saved chart to view details",
-                         id="saved-detail-text")
-            yield Static("", id="saved-chart-hover-info", classes="hover-info")
-            yield ChartWidget(id="saved-chart-widget",
-                              tooltip_id="#saved-chart-hover-info")
-            yield Static("", id="saved-pdf-status")
-
-
-class BacktestingTab(Vertical):
-    """Placeholder for future backtesting features."""
-
-    DEFAULT_CSS = "BacktestingTab { height: 1fr; background: #000000; align: center middle; }"
-
-    def compose(self) -> ComposeResult:
-        yield Static(
-            RichText.from_markup(
-                "[#00E5FF bold]BACKTESTING[/]\n\n"
-                "[#FF8C00]Coming Soon[/]\n\n"
-                "[#664400]Historical payoff simulation, scenario analysis,\n"
-                "and strategy performance over custom date ranges.[/]"
-            ),
-            id="backtesting-placeholder",
-        )
-
-
-_HELP_TEXT = """\
-[bold #00E5FF]╔══════════════════════════════════════════════════════════════════════╗[/]
-[bold #00E5FF]║              OPTIONS TERMINAL  ·  USER GUIDE                        ║[/]
-[bold #00E5FF]╚══════════════════════════════════════════════════════════════════════╝[/]
-
-[bold #FF8C00]QUICK START[/]
-  1. Go to the [bold #00E5FF]STRATEGY BUILDER[/] tab.
-  2. Enter a ticker, press [bold]Fetch Expiries[/], pick an expiry, then [bold]Load Chain[/].
-  3. Click an option-chain row to set the Strike, choose CALL/PUT and LONG/SHORT,
-     then press [bold #00FF41]Add Live Leg[/]. The payoff chart updates instantly.
-  4. Press [bold #FFE000]Ctrl+S[/] to save, or [bold #FFE000]Ctrl+P[/] to export a PDF to ~/Downloads/.
-
-[bold #FF8C00]NAVIGATION[/]
-  Mouse click or [bold]Tab[/] / [bold]Shift+Tab[/] to move between widgets.
-  [bold]Enter[/] activates buttons and opens Select dropdowns.
-  [bold]Arrow keys[/] navigate DataTable rows and Select options.
-  [bold]Esc[/] closes a Select dropdown without changing the value.
-
-[bold #FF8C00]KEYBOARD SHORTCUTS[/]
-  [bold #FFE000]?[/]        Open this Help tab
-  [bold #FFE000]Q[/]        Quit the terminal
-  [bold #FFE000]Ctrl+S[/]   Save current strategy to saved_charts/
-  [bold #FFE000]Ctrl+P[/]   Export PDF report to ~/Downloads/
-  [bold #FFE000]Ctrl+R[/]   Refresh / redraw the payoff chart
-  [bold #FFE000]F5[/]       Refresh / redraw the payoff chart
-  [bold #FFE000]Tab[/]      Move focus to next widget
-  [bold #FFE000]Shift+Tab[/] Move focus to previous widget
-
-[bold #FF8C00]STRATEGY BUILDER TAB[/]  (live option chains from Yahoo Finance)
-  ┌─ LEFT PANEL — collapsible sections ────────────────────────────────────┐
-  │  [bold]DATA SOURCE[/]      Ticker · Fetch Expiries · Expiry · Load Chain         │
-  │  [bold]STRATEGY SETUP[/]   Strategy Name · Target Price · Budget · Price Type    │
-  │                     Option Type [CALL/PUT] · Direction [LONG/SHORT]    │
-  │                     Contracts · Strike                                 │
-  │  [bold]LEGS[/]             Add Live Leg · legs table · Clear All / Remove Leg    │
-  └───────────────────────────────────────────────────────────────────────┘
-  ┌─ RIGHT PANEL ─────────────────────────────────────────────────────────┐
-  │  [bold #00E5FF]Option Chain[/]  Strike · Bid · Mid · Ask · IV · OI · Vol · Δ          │
-  │    The ATM strike row is highlighted in [bold #FFE000]amber[/].                          │
-  │    Click any row to auto-fill the [bold]Strike[/] field in Strategy Setup.    │
-  │                                                                       │
-  │  [bold #00E5FF]Metrics bar[/]  NET PREMIUM · MAX PROFIT · MAX LOSS · BREAKEVEN(S)   │
-  │  [bold #00E5FF]Payoff chart[/]  Profit (green) / Loss (red) zones, breakeven labels │
-  │    and a cyan vertical marker at the current spot price.              │
-  │                                                                       │
-  │  [bold]Save[/]        — serialises strategy to saved_charts/ (JSON).          │
-  │  [bold]Export PDF[/]  — generates a PDF report via ReportLab and saves        │
-  │                  to ~/Downloads/ and saved_pdfs/                      │
-  └───────────────────────────────────────────────────────────────────────┘
-
-[bold #FF8C00]MY STRATEGIES TAB[/]
-  Lists all previously saved strategies (newest first).
-  Click a row to view details (legs, metrics) in the right panel.
-  [bold]Delete Selected[/] removes the file permanently.
-
-[bold #FF8C00]METRICS GLOSSARY[/]
-  [bold]Net Premium[/]   CR = net credit received. DR = net debit paid.
-  [bold]Max Profit[/]    Best-case P&L across the full spot range.
-  [bold]Max Loss[/]      Worst-case P&L — how much you can lose.
-  [bold]Breakeven(s)[/]  Spot price(s) where total P&L = 0.
-  All values are [bold]per contract[/] — one US equity option contract = 100 shares,
-  so the dashboard already multiplies premium × quantity × 100 for you.
-
-[bold #FF8C00]TIPS[/]
-  • Press [bold #FFE000]Ctrl+R[/] after resizing the window to redraw the chart at the new size.
-  • The [bold]Target Price[/] input adds a cyan marker on the chart so you can
-    instantly see your expected P&L at your price target.
-  • PDF export uses ReportLab (installed automatically with pip install reportlab).
-    If not installed, a LaTeX .tex file is exported instead.
-  • Live data requires an internet connection and uses Yahoo Finance (yfinance).
-
-[dim]─────────────────────────────────────────────────────────────────────────[/]
-[dim]OPTIONS TERMINAL  ·  python tui.py  ·  press Q to quit[/]
-"""
-
-
-class HelpTab(VerticalScroll):
-    """Scrollable user guide panel."""
-
-    DEFAULT_CSS = "HelpTab { height: 1fr; background: #000000; padding: 1 2; }"
-
-    def compose(self) -> ComposeResult:
-        yield Static(_HELP_TEXT, markup=True, id="help-content")
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
 # Main Application
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class OptionsTUI(App[None]):
     """Bloomberg-style options strategy terminal."""
 
-    CSS_PATH  = "tui.tcss"
+    # Resolved relative to this module (tui/app.py) → tui/styles.tcss
+    CSS_PATH  = "styles.tcss"
     TITLE     = "OPTIONS TERMINAL"
 
     BINDINGS = [
@@ -1311,6 +625,8 @@ class OptionsTUI(App[None]):
                     self._set_live_status(f"Fetched {len(expiries)} expiries.")
                 else:
                     self._set_live_status(f"No expiries found for {ticker}.")
+                # NOTE (refactor-spotted bug): _update_move_required() is not
+                # defined on this class. Preserved as-is per refactor brief.
                 self._update_move_required()
             self.app.call_from_thread(_update)
         except Exception as exc:
@@ -1669,7 +985,8 @@ class OptionsTUI(App[None]):
 
     def spawn_new_window(self) -> None:
         """Launch a fresh TUI instance in a new terminal window via launch.py."""
-        launch_py = Path(__file__).parent / "launch.py"
+        # tui/app.py → parent.parent = project root, where launch.py lives
+        launch_py = Path(__file__).resolve().parent.parent / "launch.py"
         subprocess.Popen(
             [sys.executable, str(launch_py)],
             start_new_session=True,
@@ -1695,16 +1012,3 @@ class OptionsTUI(App[None]):
             self.query_one("#toast-container", ToastContainer).show(msg, style, duration)
         except Exception:
             pass
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# Entry point
-# ═══════════════════════════════════════════════════════════════════════════════
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="OPTIONS TERMINAL — payoff analysis")
-    parser.add_argument("--session-name", default="",
-                        help="Set the window/app title (e.g. 'AAPL Iron Condor')")
-    parser.add_argument("--ticker", default="",
-                        help="Pre-populate the ticker input on startup")
-    args = parser.parse_args()
-    OptionsTUI(ticker=args.ticker, session_name=args.session_name).run()
