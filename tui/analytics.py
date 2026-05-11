@@ -138,6 +138,78 @@ def _analytical_max_profit_loss(legs: list[dict]) -> tuple[float | None, float |
     return None, None   # unrecognised — caller keeps numeric-scan result
 
 
+def compute_net_greeks(legs: list[dict], spot: float | None) -> tuple[float, float]:
+    """Return (net_delta, net_theta) summed across all legs.
+
+    Per-leg contribution:
+      * Option legs: sign × BS_greek × qty × _SHARES_PER_CONTRACT
+        (sign = +1 long, -1 short; net_delta is share-equivalent, net_theta
+         is daily $ decay)
+      * Stock legs: sign × qty contributes to delta only (qty is shares,
+        no ×100); theta = 0
+      * Legs missing IV (e.g. preset-loaded with no live chain data) are
+        skipped — their contribution stays 0.
+
+    Returns (NaN, NaN) if spot is missing/invalid OR no leg could contribute
+    (so the UI knows to render "—" rather than a spurious 0.00).
+    """
+    if spot is None or not (spot > 0):
+        return float("nan"), float("nan")
+
+    from datetime import datetime, date
+    from core.providers._bs import bs_greeks
+
+    today = date.today()
+    net_delta = 0.0
+    net_theta = 0.0
+    contributed = False
+
+    for L in legs:
+        leg_type = (L.get("type") or "").lower()
+        pos = (L.get("pos") or "long").lower()
+        sign = 1 if pos == "long" else -1
+        qty = int(L.get("qty", 1))
+
+        if leg_type in ("stock", "stock (underlying)"):
+            # Stock delta = ±1 per share; theta = 0. qty is already shares
+            # so we do NOT apply the ×100 contract multiplier here.
+            net_delta += sign * qty
+            contributed = True
+            continue
+
+        if leg_type not in ("call", "put"):
+            continue
+
+        # IV is required for BS — captured on add for live legs, missing for
+        # preset/saved legs. Skip silently when absent.
+        iv_raw = L.get("iv")
+        try:
+            iv = float(iv_raw) if iv_raw is not None else float("nan")
+        except (TypeError, ValueError):
+            iv = float("nan")
+        if iv != iv or iv <= 0:
+            continue
+
+        try:
+            exp_date = datetime.strptime(L["expiry"], "%Y-%m-%d").date()
+        except (KeyError, ValueError, TypeError):
+            continue
+        t_years = max((exp_date - today).days / 365.0, 1.0 / 365.0)
+
+        strike = float(L.get("K", 0.0))
+        g = bs_greeks(spot, strike, t_years, iv, leg_type)
+        if g["delta"] == g["delta"]:
+            net_delta += sign * g["delta"] * qty * _SHARES_PER_CONTRACT
+            contributed = True
+        if g["theta"] == g["theta"]:
+            net_theta += sign * g["theta"] * qty * _SHARES_PER_CONTRACT
+            contributed = True
+
+    if not contributed:
+        return float("nan"), float("nan")
+    return net_delta, net_theta
+
+
 def _is_multi_directional(legs: list[dict]) -> bool:
     """
     Return True if the strategy can profit from the underlying moving in either

@@ -122,15 +122,50 @@ def _render_chart(strategy: Strategy, width: int, height: int,
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class MetricsBar(Horizontal):
-    """Four metric cells: Net Premium · Max Profit · Max Loss · Breakevens."""
+    """Four metric cells + provider status indicator on the right."""
 
-    DEFAULT_CSS = "MetricsBar { height: 5; }"
+    # Status cell uses a fixed width so the 4 metric cells (width: 1fr each)
+    # split the remaining space evenly. Border + bg + content alignment match
+    # the existing .metric-box look so the row reads as one bar.
+    DEFAULT_CSS = """
+    MetricsBar { height: 5; }
+    MetricsBar .status-indicator {
+        width: 16;
+        height: 5;
+        background: #080400;
+        border: solid #2a1500;
+        content-align: center middle;
+        padding: 0 1;
+    }
+    """
+
+    # State labels exposed so callers can refer to them by name.
+    STATUS_IBKR_LIVE = "ibkr_live"
+    STATUS_IBKR_DOWN = "ibkr_down"
+    STATUS_YFINANCE  = "yfinance"
 
     def compose(self) -> ComposeResult:
         yield Static("", id="m-net",    classes="metric-box")
         yield Static("", id="m-profit", classes="metric-box")
         yield Static("", id="m-loss",   classes="metric-box")
         yield Static("", id="m-be",     classes="metric-box")
+        yield Static("", id="m-delta",  classes="metric-box")
+        yield Static("", id="m-theta",  classes="metric-box")
+        yield Static("", id="m-status", classes="status-indicator")
+
+    def set_status(self, state: str) -> None:
+        """Render the provider status cell. `state` is one of the STATUS_* labels."""
+        if state == self.STATUS_IBKR_LIVE:
+            label, color = "● IBKR LIVE", C_BB_GREEN
+        elif state == self.STATUS_IBKR_DOWN:
+            label, color = "○ IBKR DOWN", C_BB_RED
+        else:
+            label, color = "◌ YFINANCE", C_AMBER
+        try:
+            self.query_one("#m-status", Static).update(
+                RichText(label, style=f"{color} bold"))
+        except Exception:
+            pass
 
     def update_metrics(self, summary: dict) -> None:
         net   = summary.get("net_premium", 0.0)
@@ -162,6 +197,28 @@ class MetricsBar(Horizontal):
         self.query_one("#m-be").update(
             _cell("BREAKEVEN(S)", be_str, C_BB_WHITE))
 
+        # NET Δ — share-equivalent delta (sum of leg.delta × qty × 100).
+        # Green when positive (net long bias), red when negative.
+        # NaN/missing → dim "—" (e.g. legs added from a preset have no IV yet).
+        net_d = summary.get("net_delta")
+        if net_d is None or (isinstance(net_d, float) and net_d != net_d):
+            self.query_one("#m-delta").update(_cell("NET Δ", "—", C_BB_LABEL))
+        else:
+            d_color = C_BB_GREEN if net_d >= 0 else C_BB_RED
+            self.query_one("#m-delta").update(
+                _cell("NET Δ", f"{net_d:+.2f}", d_color))
+
+        # NET Θ — daily P&L decay in dollars (sum of leg.theta × qty × 100).
+        # Always rendered red — theta is a cost regardless of sign (positive
+        # values represent received decay on net-short premium positions).
+        net_t = summary.get("net_theta")
+        if net_t is None or (isinstance(net_t, float) and net_t != net_t):
+            self.query_one("#m-theta").update(_cell("NET Θ", "—", C_BB_LABEL))
+        else:
+            sign = "-" if net_t < 0 else "+"
+            self.query_one("#m-theta").update(
+                _cell("NET Θ", f"{sign}${abs(net_t):,.2f}", C_BB_RED))
+
     def reset(self) -> None:
         """Blank all metric cells to dashes (no active strategy)."""
         def _cell(title: str) -> RichText:
@@ -172,7 +229,9 @@ class MetricsBar(Horizontal):
         for wid, title in (("#m-net",    "NET PREMIUM"),
                            ("#m-profit", "MAX PROFIT"),
                            ("#m-loss",   "MAX LOSS"),
-                           ("#m-be",     "BREAKEVEN(S)")):
+                           ("#m-be",     "BREAKEVEN(S)"),
+                           ("#m-delta",  "NET Δ"),
+                           ("#m-theta",  "NET Θ")):
             try: self.query_one(wid).update(_cell(title))
             except Exception: pass
 
@@ -308,9 +367,10 @@ class ToastContainer(Static):
     def on_mount(self) -> None:
         self.display = False
 
-    def show(self, msg: str, style: str = C_GREEN, duration: float = 2.5) -> None:
+    def show(self, msg: str, style: str = C_GREEN, duration: float = 2.5,
+             prefix: str = "✓") -> None:
         t = RichText()
-        t.append(f"  ✓  {msg}  ", style=f"{style} bold")
+        t.append(f"  {prefix}  {msg}  ", style=f"{style} bold")
         self.update(t)
         self.display = True
         self.set_timer(duration, self._hide)

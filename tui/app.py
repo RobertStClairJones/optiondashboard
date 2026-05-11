@@ -13,8 +13,11 @@ Imports from sibling modules:
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
+import threading
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -37,7 +40,7 @@ from core import Option, StockPosition, Strategy
 from utils.export_pdf import export_pdf
 
 # ── Sibling modules ──────────────────────────────────────────────────────────
-from tui.analytics import _fmt_money, _analytical_max_profit_loss
+from tui.analytics import _fmt_money, _analytical_max_profit_loss, compute_net_greeks
 from tui.constants import (
     C_AMBER, C_GREEN, C_RED, C_CYAN, C_YELLOW, C_DIM,
     C_BB_LABEL, C_BB_WHITE, C_BB_GREEN, C_BB_RED, C_BB_GOLD,
@@ -183,7 +186,8 @@ class OptionsTUI(App[None]):
         Binding("ctrl+p", "action_pdf",          "PDF"),
         Binding("ctrl+r", "action_refresh_chart","Refresh"),
         Binding("ctrl+n", "new_window",          "New Window"),
-        Binding("f5",     "action_refresh_chart","Refresh",   show=False),
+        Binding("ctrl+k", "reconnect_ibkr",      "Reconnect IBKR", show=False),
+        Binding("f5",     "action_refresh_chart","Refresh",        show=False),
         Binding("question_mark", "show_help",    "Help"),
     ]
 
@@ -193,6 +197,14 @@ class OptionsTUI(App[None]):
         self._cli_session_name = session_name.strip()
         self.target_price: float | None = None
         self.budget:       float | None = None
+
+        # Provider routing — read OPTIONDASH_PROVIDER once at startup.
+        # _provider is only populated for ibkr; the polling/reconnect workers
+        # poke at provider._ib directly. yfinance gets a static indicator.
+        self._provider_name     = os.getenv("OPTIONDASH_PROVIDER", "yfinance").lower()
+        self._provider          = None
+        # Serializes concurrent connect attempts (initial connect + Ctrl+K).
+        self._ibkr_connect_lock = threading.Lock()
 
     # ── reactive state ──────────────────────────────────────────────────────
     legs: reactive[list[dict]] = reactive(list, always_update=True)
@@ -230,7 +242,9 @@ class OptionsTUI(App[None]):
         live_legs_tbl.add_columns("#", "Type", "Pos", "Strike", "Prem", "Qty", "Expiry")
 
         chain_tbl: DataTable = self.query_one("#chain-table")
-        chain_tbl.add_columns("Strike", "Bid", "Mid", "Ask", "IV", "OI", "Vol", "Δ")
+        chain_tbl.add_columns(
+            "Strike", "Bid", "Mid", "Ask", "IV", "OI", "Vol",
+            "Δ", "Γ", "Θ", "V")
         # Header tooltips — shown by Textual on hover.
         try:
             chain_tbl.show_header = True
@@ -247,8 +261,11 @@ class OptionsTUI(App[None]):
                 "IV: Implied Volatility — market's expectation of future price movement\n"
                 "OI: Open Interest — total number of outstanding contracts\n"
                 "Vol: Volume — number of contracts traded today\n"
-                "Δ:  Delta — rate of change of option price vs spot price "
-                "(0..1 calls, -1..0 puts)"
+                "Δ:  Delta — option price change per $1 spot move "
+                "(0..1 calls, -1..0 puts)\n"
+                "Γ:  Gamma — rate of delta change per $1 spot move\n"
+                "Θ:  Theta — time decay per calendar day\n"
+                "V:  Vega — option price change per 1% IV move"
             )
         except Exception:
             pass
@@ -258,6 +275,186 @@ class OptionsTUI(App[None]):
             self.title = self._cli_session_name
         if self._cli_ticker:
             self.query_one("#live-ticker", Input).value = self._cli_ticker
+
+        # Provider status indicator on the metrics bar.
+        self._init_provider_status()
+
+    # ── Provider status indicator ────────────────────────────────────────────
+    def _init_provider_status(self) -> None:
+        """Wire up the status cell AND the provider that chain fetches route
+        through. self._provider is always set after this runs — yfinance
+        gets a YFinanceProvider, ibkr gets LegacyAdapter(IBKRProvider())."""
+        try:
+            bar = self.query_one("#live-metrics-bar", MetricsBar)
+        except Exception:
+            return
+        try:
+            from core.providers import get_provider
+            self._provider = get_provider()
+        except Exception as exc:
+            # Provider init shouldn't fail under yfinance (yfinance is imported
+            # lazily on first call). Under ibkr a failure here means ib_insync
+            # is missing or unimportable — show DOWN + a diagnostic toast.
+            fallback_state = (MetricsBar.STATUS_IBKR_DOWN
+                              if self._provider_name == "ibkr"
+                              else MetricsBar.STATUS_YFINANCE)
+            bar.set_status(fallback_state)
+            self._show_toast(f"Provider init failed: {exc}",
+                             style=C_RED, duration=6.0, prefix="✕")
+            return
+
+        if self._provider_name == "ibkr":
+            # Start as DOWN; workers will flip to LIVE once a connection lands.
+            bar.set_status(MetricsBar.STATUS_IBKR_DOWN)
+            self._ibkr_initial_connect()
+            self._ibkr_status_poll()
+        else:
+            bar.set_status(MetricsBar.STATUS_YFINANCE)
+
+    def _set_ibkr_status(self, connected: bool, err: str = "") -> None:
+        """Main-thread setter for the indicator + optional error toast.
+        Workers reach this via call_from_thread. Single chokepoint so every
+        worker exit path produces a visible status update."""
+        try:
+            bar = self.query_one("#live-metrics-bar", MetricsBar)
+            bar.set_status(MetricsBar.STATUS_IBKR_LIVE if connected
+                           else MetricsBar.STATUS_IBKR_DOWN)
+        except Exception:
+            pass
+        if err:
+            self._show_toast(f"IBKR: {err}", style=C_RED, duration=8.0, prefix="✕")
+
+    @work(thread=True)
+    def _ibkr_initial_connect(self) -> None:
+        """One-shot connect at startup so the indicator reflects reality fast.
+
+        Whole body is wrapped in a catch-all because Textual's @work silently
+        swallows unhandled exceptions inside a worker — without this, any
+        failure (asyncio/threading quirks, attribute errors, ib_insync edge
+        cases) leaves the indicator stuck at DOWN with no diagnostic surface.
+        Every exit path routes through _set_ibkr_status() so the UI always
+        reflects what happened.
+        """
+        try:
+            # Import inside the worker so yfinance mode never touches ib_insync.
+            from core.providers.ibkr_provider import IBKRProvider
+            from core.providers.legacy_adapter import LegacyAdapter
+
+            provider = self._provider
+            if provider is None:
+                self.call_from_thread(
+                    self._set_ibkr_status, False, "provider not initialized")
+                return
+            # Under ibkr the provider is LegacyAdapter wrapping IBKRProvider;
+            # unwrap so the type check accepts both shapes.
+            target = provider.inner if isinstance(provider, LegacyAdapter) else provider
+            if not isinstance(target, IBKRProvider):
+                self.call_from_thread(
+                    self._set_ibkr_status, False,
+                    f"wrong provider type: {type(provider).__name__}")
+                return
+
+            with self._ibkr_connect_lock:
+                try:
+                    provider._ensure_connected()
+                    ok, err_msg = True, ""
+                except Exception as exc:
+                    ok, err_msg = False, f"{type(exc).__name__}: {exc}"
+            self.call_from_thread(self._set_ibkr_status, ok, err_msg)
+        except Exception as exc:
+            log.exception("ibkr initial-connect worker crashed")
+            try:
+                self.call_from_thread(
+                    self._set_ibkr_status, False,
+                    f"worker crashed: {type(exc).__name__}: {exc}")
+            except Exception:
+                pass
+
+    @work(thread=True)
+    def _ibkr_status_poll(self) -> None:
+        """Read-only health check every 10s. Never initiates a connection
+        itself; Ctrl+K and the initial-connect worker own all connect attempts.
+
+        Wrapped so a transient AttributeError (e.g., _ib torn down mid-read)
+        doesn't kill the whole polling loop — we retry next tick."""
+        while True:
+            try:
+                time.sleep(10)
+                provider = self._provider
+                if provider is None:
+                    connected = False
+                else:
+                    ib = getattr(provider, "_ib", None)
+                    if ib is None:
+                        connected = False
+                    else:
+                        try:
+                            connected = bool(ib.isConnected())
+                        except Exception:
+                            connected = False
+                try:
+                    self.call_from_thread(self._set_ibkr_status, connected)
+                except Exception:
+                    pass
+            except Exception:
+                log.exception("ibkr poll worker tick crashed; continuing")
+
+    def action_reconnect_ibkr(self) -> None:
+        """Ctrl+K — force-reconnect the IBKR provider. No-op under yfinance."""
+        if self._provider_name != "ibkr" or self._provider is None:
+            return
+        self._show_toast("Reconnecting to IBKR...",
+                         style=C_YELLOW, duration=5.0, prefix="⟳")
+        self._ibkr_reconnect()
+
+    @work(thread=True)
+    def _ibkr_reconnect(self) -> None:
+        """Drop the existing IB connection and try a fresh connect. Reports
+        outcome via a toast and updates the indicator. Same catch-all pattern
+        as _ibkr_initial_connect so silent worker crashes don't strand the UI."""
+        try:
+            from core.providers.ibkr_provider import IBKRProvider
+            from core.providers.legacy_adapter import LegacyAdapter
+
+            provider = self._provider
+            target = (provider.inner if isinstance(provider, LegacyAdapter)
+                      else provider)
+            if provider is None or not isinstance(target, IBKRProvider):
+                ptype = type(provider).__name__ if provider is not None else "None"
+                self.call_from_thread(
+                    self._set_ibkr_status, False,
+                    f"cannot reconnect — provider is {ptype}")
+                return
+
+            err_msg = ""
+            with self._ibkr_connect_lock:
+                try:
+                    if provider._ib is not None:
+                        try:
+                            provider._ib.disconnect()
+                        except Exception:
+                            pass
+                        provider._ib = None
+                    provider._ensure_connected()
+                    ok = True
+                except Exception as exc:
+                    ok = False
+                    err_msg = f"{type(exc).__name__}: {exc}"
+            if ok:
+                self.call_from_thread(self._set_ibkr_status, True, "")
+                self.call_from_thread(self._show_toast,
+                                      "IBKR reconnected", C_GREEN, 2.5, "✓")
+            else:
+                self.call_from_thread(self._set_ibkr_status, False,
+                                      f"reconnect failed: {err_msg}")
+        except Exception as exc:
+            log.exception("ibkr reconnect worker crashed")
+            try:
+                self.call_from_thread(
+                    self._set_ibkr_status, False,
+                    f"reconnect crashed: {type(exc).__name__}: {exc}")
+            except Exception:
+                pass
 
     # ── Legs helpers ─────────────────────────────────────────────────────────
     def _refresh_legs_table(self) -> None:
@@ -293,6 +490,12 @@ class OptionsTUI(App[None]):
             summary["max_profit"] = ana_p
         if ana_l is not None:
             summary["max_loss"] = ana_l
+
+        # Per-leg BS greeks aggregated at current spot. NaN if spot is unknown
+        # or no leg has captured IV — MetricsBar renders "—" in that case.
+        net_delta, net_theta = compute_net_greeks(self.legs, self._live_spot)
+        summary["net_delta"] = net_delta
+        summary["net_theta"] = net_theta
 
         # Update Strategy Builder widgets
         self.query_one("#live-metrics-bar",  MetricsBar).update_metrics(summary)
@@ -607,9 +810,10 @@ class OptionsTUI(App[None]):
     @work(thread=True)
     def _fetch_expiries(self, ticker: str) -> None:
         try:
-            from core.market_data import get_spot_price, get_available_expiries
-            spot     = get_spot_price(ticker)
-            expiries = get_available_expiries(ticker)
+            # Route through self._provider so chain data comes from whichever
+            # backend the user picked at startup (yfinance default, ibkr opt-in).
+            spot     = self._provider.get_spot_price(ticker)
+            expiries = self._provider.get_available_expiries(ticker)
             self._live_spot     = spot
             self._live_expiries = expiries
 
@@ -647,8 +851,9 @@ class OptionsTUI(App[None]):
     @work(thread=True)
     def _fetch_chain(self, ticker: str, expiry: str) -> None:
         try:
-            from core.market_data import get_options_chain
-            calls, puts = get_options_chain(ticker, expiry)
+            # Route through self._provider; LegacyAdapter ensures both
+            # providers return (calls, puts) with yfinance-style columns.
+            calls, puts = self._provider.get_options_chain(ticker, expiry)
             self._live_calls = calls
             self._live_puts  = puts
 
@@ -663,6 +868,7 @@ class OptionsTUI(App[None]):
                 self.query_one("#live-strike-label", Static).update(
                     RichText(f" {len(strikes)} strikes loaded.", style=C_AMBER))
                 self._set_live_status("Chain loaded — pick a strike and add leg.")
+                self._check_chain_sparseness(calls, puts)
             self.app.call_from_thread(_update)
         except Exception as exc:
             self.app.call_from_thread(self._set_live_status, f"Error: {exc}")
@@ -688,6 +894,16 @@ class OptionsTUI(App[None]):
             except (TypeError, ValueError):
                 return "—"
 
+        def _greek(v) -> str:
+            """Format gamma/theta/vega — 3 decimal places, signed."""
+            try:
+                f = float(v)
+                if f != f:
+                    return "—"
+                return f"{f:+.3f}"
+            except (TypeError, ValueError):
+                return "—"
+
         # Identify ATM strike (closest to current spot) so we can highlight it.
         atm_strike: float | None = None
         if self._live_spot and self._live_spot > 0:
@@ -697,7 +913,12 @@ class OptionsTUI(App[None]):
             except Exception:
                 atm_strike = None
 
+        # All four greek columns are best-effort — fall back to "—" when the
+        # column is missing or NaN (degenerate BS inputs, missing IV, etc.).
         delta_col = "delta" if "delta" in df.columns else None
+        gamma_col = "gamma" if "gamma" in df.columns else None
+        theta_col = "theta" if "theta" in df.columns else None
+        vega_col  = "vega"  if "vega"  in df.columns else None
 
         for _, row in df.iterrows():
             strike = float(row["strike"])
@@ -712,6 +933,9 @@ class OptionsTUI(App[None]):
                 _int(row.get("openInterest", 0)),
                 _int(row.get("volume", 0)),
                 _delta(row[delta_col]) if delta_col else "—",
+                _greek(row[gamma_col]) if gamma_col else "—",
+                _greek(row[theta_col]) if theta_col else "—",
+                _greek(row[vega_col])  if vega_col  else "—",
             ]
 
             is_atm = atm_strike is not None and abs(strike - float(atm_strike)) < 1e-9
@@ -784,9 +1008,18 @@ class OptionsTUI(App[None]):
         row  = df[df["strike"] == strike]
         prem = float(row[src].iloc[0]) if not row.empty else 0.0
 
+        # Capture IV at add-time so the MetricsBar can compute per-leg greeks
+        # later (delta/theta) via bs_greeks. NaN if the chain row is missing
+        # impliedVolatility (e.g. delayed/sparse data).
+        iv = float("nan")
+        if not row.empty and "impliedVolatility" in row.columns:
+            v = row["impliedVolatility"].iloc[0]
+            if v == v:  # not NaN
+                iv = float(v)
+
         self.legs = self.legs + [
             dict(type=opt_type, pos=pos, K=strike, prem=prem, qty=qty,
-                 expiry=self._live_expiry, ticker=ticker)
+                 expiry=self._live_expiry, ticker=ticker, iv=iv)
         ]
         self._refresh_legs_table()
         self._rebuild_and_render()
@@ -1007,8 +1240,29 @@ class OptionsTUI(App[None]):
         except Exception:
             pass
 
-    def _show_toast(self, msg: str, style: str = C_GREEN, duration: float = 2.5) -> None:
+    def _show_toast(self, msg: str, style: str = C_GREEN, duration: float = 2.5,
+                    prefix: str = "✓") -> None:
         try:
-            self.query_one("#toast-container", ToastContainer).show(msg, style, duration)
+            self.query_one("#toast-container", ToastContainer).show(
+                msg, style, duration, prefix=prefix)
+        except Exception:
+            pass
+
+    def _check_chain_sparseness(self, calls, puts) -> None:
+        """Toast a warning if >50% of mid prices are NaN in either chain.
+        Handles both yfinance ('mid') and ibkr ('Mid') column naming."""
+        try:
+            for df in (calls, puts):
+                if df is None or len(df) == 0:
+                    continue
+                col = "mid" if "mid" in df.columns else (
+                      "Mid" if "Mid" in df.columns else None)
+                if col is None:
+                    continue
+                if df[col].isna().mean() > 0.5:
+                    self._show_toast(
+                        "Delayed or incomplete data — check market hours or subscription",
+                        style=C_YELLOW, duration=4.0, prefix="⚠")
+                    return
         except Exception:
             pass

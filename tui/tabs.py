@@ -80,8 +80,8 @@ class LiveDataTab(Horizontal):
             with Vertical(id="chain-panel"):
                 yield Label("OPTION CHAIN", classes="section-label")
                 yield Static(
-                    "  IV=Implied Volatility · OI=Open Interest · "
-                    "Vol=Volume Today · Δ=Delta",
+                    "  IV=Implied Vol · OI=Open Int · Vol=Volume · "
+                    "Δ=Delta · Γ=Gamma · Θ=Theta · V=Vega",
                     id="chain-legend",
                     classes="chain-legend",
                 )
@@ -164,6 +164,7 @@ _HELP_TEXT = """\
   [bold #FFE000]Ctrl+P[/]   Export PDF report to ~/Downloads/
   [bold #FFE000]Ctrl+R[/]   Refresh / redraw the payoff chart
   [bold #FFE000]F5[/]       Refresh / redraw the payoff chart
+  [bold #FFE000]Ctrl+K[/]   Reconnect to IBKR (only when OPTIONDASH_PROVIDER=ibkr)
   [bold #FFE000]Tab[/]      Move focus to next widget
   [bold #FFE000]Shift+Tab[/] Move focus to previous widget
 
