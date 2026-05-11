@@ -1,13 +1,32 @@
-# Options Terminal
+## Quick Start
 
-A Bloomberg-style terminal for options strategy analysis. Fetch live chains, build multi-leg strategies, visualise payoff diagrams, and export PDF reports — all from the command line.
-
-## Quick start
+**First-time setup** (install dependencies):
 
 ```bash
 pip install -r requirements.txt
-python tui.py
 ```
+
+**1. Start IB Gateway** — log in with paper trading credentials, wait for all green status rows.
+
+**2. Launch the dashboard:**
+
+```bash
+cd /Users/robertjones/Documents/GitHub/optiondashboard
+OPTIONDASH_PROVIDER=ibkr python -m tui
+```
+
+**3. Fallback (no Gateway):**
+
+```bash
+cd /Users/robertjones/Documents/GitHub/optiondashboard
+python -m tui
+```
+
+---
+
+# Options Terminal
+
+A Bloomberg-style terminal for options strategy analysis. Fetch live chains, build multi-leg strategies, visualise payoff diagrams, and export PDF reports — all from the command line.
 
 ## Launching
 
